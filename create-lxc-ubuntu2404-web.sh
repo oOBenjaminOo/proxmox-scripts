@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
-# Création interactive d'un LXC Ubuntu 24.04 LTS sur Proxmox VE.
-# Applications : Apache, PHP, MariaDB, phpMyAdmin, Samba, code-server et SSH.
-
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
 readonly BACKTITLE="Proxmox VE - LXC Web Ubuntu 24.04"
 LOG_FILE="/var/log/create-lxc-web-$(date '+%Y%m%d-%H%M%S').log"
-TEMP_DIR=""
-CTID=""
-CT_CREATION_STARTED=0
-
+TEMP_DIR=""; CTID=""; CT_CREATION_STARTED=0
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
 msg_info(){ echo -e "${BLUE}▶${RESET} $*"; }
 msg_ok(){ echo -e "${GREEN}✔${RESET} $*"; }
 msg_warn(){ echo -e "${YELLOW}⚠${RESET} $*"; }
 msg_err(){ echo -e "${RED}✖${RESET} $*" >&2; }
-
 cleanup(){
   local rc=$?
   [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
@@ -33,265 +26,81 @@ cleanup(){
 }
 trap cleanup EXIT
 trap 'msg_err "Erreur ligne ${LINENO} : ${BASH_COMMAND}"' ERR
-
 wt(){ whiptail --backtitle "$BACKTITLE" "$@" 3>&1 1>&2 2>&3; }
-wt_msg(){ whiptail --backtitle "$BACKTITLE" --title "$1" --msgbox "$2" 16 78; }
-wt_yesno(){ whiptail --backtitle "$BACKTITLE" --title "$1" --yesno "$2" 16 78; }
+wt_msg(){ whiptail --backtitle "$BACKTITLE" --title "$1" --msgbox "$2" 17 80; }
+wt_yesno(){ whiptail --backtitle "$BACKTITLE" --title "$1" --yesno "$2" 17 80; }
 inputbox(){ local v; v=$(wt --title "$1" --inputbox "$2" 12 76 "$3") || exit 0; printf '%s' "$v"; }
-passwordbox(){
-  local a b
-  while true; do
-    a=$(wt --title "$1" --passwordbox "$2\n\nMinimum : 8 caractères." 14 76) || exit 0
-    (( ${#a} >= 8 )) || { wt_msg "Valeur invalide" "Le mot de passe doit contenir au moins 8 caractères."; continue; }
-    b=$(wt --title "$1" --passwordbox "Confirme le mot de passe." 12 76) || exit 0
-    [[ "$a" == "$b" ]] && { printf '%s' "$a"; return; }
-    wt_msg "Erreur" "Les deux mots de passe ne correspondent pas."
-  done
-}
-
-require_environment(){
-  [[ $EUID -eq 0 ]] || { msg_err "Exécute ce script en root sur un nœud Proxmox VE."; exit 1; }
-  for cmd in pct qm pveam pvesm pvesh whiptail; do
-    command -v "$cmd" >/dev/null 2>&1 || { msg_err "Commande manquante : $cmd"; exit 1; }
-  done
-  [[ -r /dev/tty && -w /dev/tty ]] || { msg_err "Terminal interactif indisponible."; exit 1; }
-}
-
-storage_type(){
-  local storage="$1" type=""
-  type=$(pvesm status --storage "$storage" 2>/dev/null | awk 'NR==2 {print $2}') || true
-  if [[ -z "$type" && -r /etc/pve/storage.cfg ]]; then
-    type=$(awk -v id="$storage" '
-      /^[[:alnum:]_-]+:[[:space:]]+/ {
-        split($0,a,":"); current=a[2]; sub(/^[[:space:]]+/,"",current); current_type=a[1]
-      }
-      current==id { print current_type; exit }
-    ' /etc/pve/storage.cfg 2>/dev/null) || true
-  fi
-  printf '%s' "$type"
-}
-
-storage_menu(){
-  local content="$1" title="$2" default="$3" storage type usage
-  local rows=()
-  while read -r storage; do
-    [[ -z "$storage" ]] && continue
-    type=$(storage_type "$storage")
-    usage=$(pvesm status --storage "$storage" 2>/dev/null | awk 'NR==2 {print $6" libres sur "$4}') || true
-    rows+=("$storage" "Type: ${type:-inconnu} | ${usage:-espace inconnu}")
-  done < <(pvesm status -content "$content" 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort -u)
-  (( ${#rows[@]} > 0 )) || { wt_msg "Erreur" "Aucun stockage actif compatible avec '$content'."; exit 1; }
-  wt --title "$title" --menu "Sélectionne le stockage à utiliser." 20 88 10 "${rows[@]}" --default-item "$default"
-}
-
+passwordbox(){ local a b; while true; do a=$(wt --title "$1" --passwordbox "$2\n\nMinimum : 8 caractères." 14 76) || exit 0; (( ${#a} >= 8 )) || { wt_msg "Valeur invalide" "Le mot de passe doit contenir au moins 8 caractères."; continue; }; b=$(wt --title "$1" --passwordbox "Confirme le mot de passe." 12 76) || exit 0; [[ "$a" == "$b" ]] && { printf '%s' "$a"; return; }; wt_msg "Erreur" "Les deux mots de passe ne correspondent pas."; done; }
+require_environment(){ [[ $EUID -eq 0 ]] || { msg_err "Exécute ce script en root sur Proxmox VE."; exit 1; }; for c in pct qm pveam pvesm pvesh whiptail; do command -v "$c" >/dev/null || { msg_err "Commande manquante : $c"; exit 1; }; done; }
+storage_type(){ local s="$1" t=""; t=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $2}') || true; [[ -n "$t" ]] || t=$(awk -v id="$s" '/^[[:alnum:]_-]+:[[:space:]]+/ {split($0,a,":"); cur=a[2]; sub(/^[[:space:]]+/,"",cur); typ=a[1]} cur==id {print typ; exit}' /etc/pve/storage.cfg 2>/dev/null || true); printf '%s' "$t"; }
+storage_menu(){ local content="$1" title="$2" def="$3" s t u; local rows=(); while read -r s; do [[ -z "$s" ]] && continue; t=$(storage_type "$s"); u=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $6" libres"}') || true; rows+=("$s" "Type: ${t:-inconnu} | ${u:-espace inconnu}"); done < <(pvesm status -content "$content" 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort -u); (( ${#rows[@]} )) || { wt_msg "Erreur" "Aucun stockage compatible avec $content."; exit 1; }; wt --title "$title" --menu "Sélectionne le stockage à utiliser." 20 88 10 "${rows[@]}" --default-item "$def"; }
 validate_id(){ [[ "$1" =~ ^[1-9][0-9]{2,8}$ ]] && ! pct status "$1" >/dev/null 2>&1 && ! qm status "$1" >/dev/null 2>&1; }
 validate_hostname(){ [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$ ]]; }
 validate_user(){ [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
 validate_uint(){ [[ "$1" =~ ^[0-9]+$ ]]; }
-validate_cidr(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]]; }
 validate_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie n'est pas valide ou est déjà utilisée."; done; }
-
-set_defaults(){
-  CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100)
-  HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"
-  CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32
-  BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""
-  DNS_SERVER="8.8.8.8"; DNS_SEARCH=""; ONBOOT=1; UNPRIVILEGED=1; FIREWALL=0
-}
-
-choose_mode(){
-  MODE=$(wt --title "PARAMÈTRES" --menu "Choisis le mode de configuration.\n\nLe stockage du conteneur et celui du template seront demandés dans les deux modes." 18 80 4 \
-    "1" "Paramètres par défaut" "2" "Paramètres avancés" "3" "Quitter" --default-item "1") || exit 0
-  [[ "$MODE" != "3" ]] || exit 0
-}
-
-choose_storages(){
-  ROOTFS_STORAGE=$(storage_menu rootdir "Stockage du conteneur" "$ROOTFS_STORAGE") || exit 0
-  TEMPLATE_STORAGE=$(storage_menu vztmpl "Stockage du template" "$TEMPLATE_STORAGE") || exit 0
-}
-
-advanced_configuration(){
-  CTID=$(ask_valid "VMID" "Identifiant du conteneur LXC." "$CTID" validate_id)
-  HOSTNAME=$(ask_valid "Nom du conteneur" "Nom d'hôte du nouveau conteneur." "$HOSTNAME" validate_hostname)
-  CPU_CORES=$(ask_valid "CPU" "Nombre de cœurs CPU." "$CPU_CORES" validate_uint)
-  MEMORY_MB=$(ask_valid "Mémoire" "Mémoire vive en Mo." "$MEMORY_MB" validate_uint)
-  SWAP_MB=$(ask_valid "Swap" "Mémoire swap en Mo." "$SWAP_MB" validate_uint)
-  DISK_GB=$(ask_valid "Disque" "Taille du disque racine en Go." "$DISK_GB" validate_uint)
-  BRIDGE=$(inputbox "Bridge réseau" "Bridge Proxmox utilisé par le conteneur." "$BRIDGE")
-  VLAN_TAG=$(ask_valid "VLAN" "Tag VLAN. Utilise 0 pour aucun VLAN." "$VLAN_TAG" validate_uint)
-  if wt_yesno "Réseau" "Utiliser une adresse IPv4 attribuée par DHCP ?"; then
-    NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""
-  else
-    NETWORK_MODE="static"
-    NET_IP=$(ask_valid "Adresse IPv4" "Adresse IPv4 avec préfixe." "192.168.1.50/24" validate_cidr)
-    GATEWAY=$(ask_valid "Passerelle" "Passerelle IPv4." "192.168.1.1" validate_ip)
-  fi
-  DNS_SERVER=$(ask_valid "DNS" "Serveur DNS IPv4." "$DNS_SERVER" validate_ip)
-  wt_yesno "Pare-feu Proxmox" "Activer le pare-feu Proxmox sur l'interface réseau du conteneur ?" && FIREWALL=1 || FIREWALL=0
-  wt_yesno "Démarrage automatique" "Démarrer automatiquement le conteneur avec Proxmox ?" && ONBOOT=1 || ONBOOT=0
-  wt_yesno "Isolation" "Créer un conteneur non privilégié ?\n\nC'est le choix recommandé." && UNPRIVILEGED=1 || UNPRIVILEGED=0
-}
-
-validate_bridge(){
-  ip link show "$BRIDGE" >/dev/null 2>&1 || { wt_msg "Bridge introuvable" "Le bridge '$BRIDGE' n'existe pas sur ce nœud Proxmox."; exit 1; }
-}
-
-validate_storage_combination(){
-  local type
-  while true; do
-    type=$(storage_type "$ROOTFS_STORAGE")
-    if (( UNPRIVILEGED == 1 )) && [[ "$type" == "nfs" || "$type" == "cifs" ]]; then
-      wt_msg "Stockage incompatible" "Le stockage racine '$ROOTFS_STORAGE' est de type '$type'.\n\nUn LXC non privilégié peut échouer sur ce type de partage. Sélectionne un stockage local compatible. Le template peut rester sur le NAS."
-      ROOTFS_STORAGE=$(storage_menu rootdir "Choisir un autre stockage racine" "local-lvm") || exit 0
-      continue
-    fi
-    break
-  done
-}
-
-credentials_configuration(){
-  CT_ROOT_PASSWORD=$(passwordbox "Mot de passe root" "Mot de passe du compte root du conteneur.")
-  while true; do ADMIN_USER=$(inputbox "Utilisateur Linux" "Compte utilisé pour SSH, Samba et code-server." "admin"); validate_user "$ADMIN_USER" && break; wt_msg "Nom invalide" "Utilise des minuscules, chiffres, tirets ou underscores."; done
-  ADMIN_PASSWORD=$(passwordbox "Mot de passe Linux" "Mot de passe du compte '$ADMIN_USER'.")
-  while true; do DB_ADMIN_USER=$(inputbox "Utilisateur MariaDB" "Compte administrateur MariaDB/phpMyAdmin." "dbadmin"); validate_user "$DB_ADMIN_USER" && break; wt_msg "Nom invalide" "Utilise des minuscules, chiffres, tirets ou underscores."; done
-  DB_ADMIN_PASSWORD=$(passwordbox "Mot de passe MariaDB" "Mot de passe du compte '$DB_ADMIN_USER'.")
-  CODE_SERVER_PASSWORD=$(passwordbox "Mot de passe code-server" "Mot de passe de l'interface Web code-server.")
-}
-
-confirm_configuration(){
-  local privilege startup fw
-  (( UNPRIVILEGED == 1 )) && privilege="Non privilégié" || privilege="Privilégié"
-  (( ONBOOT == 1 )) && startup="Oui" || startup="Non"
-  (( FIREWALL == 1 )) && fw="Activé" || fw="Désactivé"
-  wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nStockage template : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\nPare-feu interface : $fw\nIsolation : $privilege\nDémarrage automatique : $startup\n\nCréer maintenant ce conteneur ?" || exit 0
-}
-
-download_template(){
-  msg_info "Recherche du template Ubuntu 24.04..."
-  pveam update >/dev/null
-  TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-24\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1)
-  [[ -n "$TEMPLATE_NAME" ]] || { msg_err "Template Ubuntu 24.04 introuvable."; exit 1; }
-  TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
-  if ! pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME"; then
-    msg_info "Téléchargement de $TEMPLATE_NAME..."
-    pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"
-  fi
-  msg_ok "Template prêt."
-}
-
-create_container(){
-  local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"
-  [[ "$NETWORK_MODE" == "static" ]] && net0+=",gw=${GATEWAY}"
-  (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"
-  msg_info "Création du conteneur LXC $CTID..."; CT_CREATION_STARTED=1
-  pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 \
-    --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" \
-    --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" \
-    --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0 \
-    --description "LXC Ubuntu 24.04 LTS - Apache, PHP, MariaDB, phpMyAdmin, Samba, code-server et SSH"
-  msg_ok "Conteneur créé."
-}
-
-build_installer(){
-  TEMP_DIR=$(mktemp -d); INNER_SCRIPT="$TEMP_DIR/install.sh"; CREDS="$TEMP_DIR/credentials.env"
-  cat > "$CREDS" <<EOF2
+validate_cidr(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]]; }
+ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie est invalide ou déjà utilisée."; done; }
+set_defaults(){ CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100); HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"; CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32; BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""; DNS_SERVER="8.8.8.8"; ONBOOT=1; UNPRIVILEGED=1; FIREWALL=0; }
+choose_mode(){ MODE=$(wt --title "PARAMÈTRES" --menu "Choisis le mode. Les stockages sont demandés dans les deux modes." 17 80 4 "1" "Paramètres par défaut" "2" "Paramètres avancés" "3" "Quitter" --default-item "1") || exit 0; [[ "$MODE" != 3 ]] || exit 0; }
+choose_storages(){ ROOTFS_STORAGE=$(storage_menu rootdir "Stockage du conteneur" "$ROOTFS_STORAGE") || exit 0; TEMPLATE_STORAGE=$(storage_menu vztmpl "Stockage du template" "$TEMPLATE_STORAGE") || exit 0; }
+advanced_configuration(){ CTID=$(ask_valid "VMID" "Identifiant du conteneur." "$CTID" validate_id); HOSTNAME=$(ask_valid "Nom" "Nom d'hôte du conteneur." "$HOSTNAME" validate_hostname); CPU_CORES=$(ask_valid "CPU" "Nombre de cœurs." "$CPU_CORES" validate_uint); MEMORY_MB=$(ask_valid "RAM" "Mémoire en Mo." "$MEMORY_MB" validate_uint); SWAP_MB=$(ask_valid "Swap" "Swap en Mo." "$SWAP_MB" validate_uint); DISK_GB=$(ask_valid "Disque" "Taille en Go." "$DISK_GB" validate_uint); BRIDGE=$(inputbox "Bridge" "Bridge Proxmox." "$BRIDGE"); VLAN_TAG=$(ask_valid "VLAN" "0 pour aucun VLAN." "$VLAN_TAG" validate_uint); if wt_yesno "Réseau" "Utiliser DHCP ?"; then NETWORK_MODE=dhcp; NET_IP=dhcp; GATEWAY=""; else NETWORK_MODE=static; NET_IP=$(ask_valid "IPv4" "Adresse avec préfixe." "192.168.1.50/24" validate_cidr); GATEWAY=$(ask_valid "Passerelle" "Passerelle IPv4." "192.168.1.1" validate_ip); fi; DNS_SERVER=$(ask_valid "DNS" "Serveur DNS IPv4." "$DNS_SERVER" validate_ip); wt_yesno "Pare-feu" "Activer le pare-feu Proxmox sur l'interface ?" && FIREWALL=1 || FIREWALL=0; wt_yesno "Démarrage" "Démarrer automatiquement avec Proxmox ?" && ONBOOT=1 || ONBOOT=0; wt_yesno "Isolation" "Créer un LXC non privilégié ?" && UNPRIVILEGED=1 || UNPRIVILEGED=0; }
+validate_bridge(){ ip link show "$BRIDGE" >/dev/null 2>&1 || { wt_msg "Bridge introuvable" "Le bridge $BRIDGE n'existe pas."; exit 1; }; }
+validate_storage(){ local t; while true; do t=$(storage_type "$ROOTFS_STORAGE"); if (( UNPRIVILEGED )) && [[ "$t" == nfs || "$t" == cifs ]]; then wt_msg "Stockage incompatible" "Un LXC non privilégié peut échouer sur $ROOTFS_STORAGE ($t). Choisis un stockage local."; ROOTFS_STORAGE=$(storage_menu rootdir "Autre stockage racine" local-lvm) || exit 0; else break; fi; done; }
+credentials(){ CT_ROOT_PASSWORD=$(passwordbox "Mot de passe root" "Mot de passe root du conteneur."); while true; do ADMIN_USER=$(inputbox "Utilisateur Linux" "Compte SSH, Samba et code-server." admin); validate_user "$ADMIN_USER" && break; wt_msg "Nom invalide" "Nom Linux invalide."; done; ADMIN_PASSWORD=$(passwordbox "Mot de passe Linux" "Mot de passe de $ADMIN_USER."); while true; do DB_ADMIN_USER=$(inputbox "Utilisateur MariaDB" "Compte MariaDB/phpMyAdmin." dbadmin); validate_user "$DB_ADMIN_USER" && break; wt_msg "Nom invalide" "Nom MariaDB invalide."; done; DB_ADMIN_PASSWORD=$(passwordbox "Mot de passe MariaDB" "Mot de passe de $DB_ADMIN_USER."); CODE_SERVER_PASSWORD=$(passwordbox "Mot de passe code-server" "Mot de passe Web code-server."); }
+confirm(){ wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nTemplate : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\n\nCréer le conteneur ?" || exit 0; }
+download_template(){ msg_info "Recherche du template Ubuntu 24.04..."; pveam update >/dev/null; TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-24\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1); [[ -n "$TEMPLATE_NAME" ]] || { msg_err "Template introuvable."; exit 1; }; TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"; pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"; msg_ok "Template prêt."; }
+create_container(){ local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"; [[ "$NETWORK_MODE" == static ]] && net0+=",gw=${GATEWAY}"; (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"; msg_info "Création du conteneur LXC $CTID..."; CT_CREATION_STARTED=1; pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0; msg_ok "Conteneur créé."; }
+build_installer(){ TEMP_DIR=$(mktemp -d); INNER_SCRIPT="$TEMP_DIR/install.sh"; CREDS="$TEMP_DIR/credentials.env"; cat >"$CREDS" <<EOF
 ADMIN_USER='$ADMIN_USER'
-ADMIN_PASSWORD_B64='$(printf '%s' "$ADMIN_PASSWORD" | base64 -w0)'
+ADMIN_PASSWORD_B64='$(printf %s "$ADMIN_PASSWORD" | base64 -w0)'
 DB_ADMIN_USER='$DB_ADMIN_USER'
-DB_ADMIN_PASSWORD_B64='$(printf '%s' "$DB_ADMIN_PASSWORD" | base64 -w0)'
-CODE_SERVER_PASSWORD_B64='$(printf '%s' "$CODE_SERVER_PASSWORD" | base64 -w0)'
+DB_ADMIN_PASSWORD_B64='$(printf %s "$DB_ADMIN_PASSWORD" | base64 -w0)'
+CODE_SERVER_PASSWORD_B64='$(printf %s "$CODE_SERVER_PASSWORD" | base64 -w0)'
 DNS_SERVER='$DNS_SERVER'
-EOF2
-  chmod 600 "$CREDS"
-  cat > "$INNER_SCRIPT" <<'INNER'
+EOF
+chmod 600 "$CREDS"; cat >"$INNER_SCRIPT" <<'INNER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
-exec > >(tee -a /var/log/lxc-web-applications-install.log) 2>&1
 source /root/.lxc-web-install-credentials
-ADMIN_PASSWORD=$(printf '%s' "$ADMIN_PASSWORD_B64" | base64 -d)
-DB_ADMIN_PASSWORD=$(printf '%s' "$DB_ADMIN_PASSWORD_B64" | base64 -d)
-CODE_SERVER_PASSWORD=$(printf '%s' "$CODE_SERVER_PASSWORD_B64" | base64 -d)
-
-printf '[RÉSEAU] Initialisation de l’interface eth0...\n'
+ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
+DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
+CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
 ip link set eth0 up || true
 systemctl restart systemd-networkd >/dev/null 2>&1 || true
 networkctl reconfigure eth0 >/dev/null 2>&1 || true
-
-printf '[RÉSEAU] Attente d’une adresse IPv4 attribuée par DHCP...\n'
-for attempt in {1..60}; do
-  if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
-    break
-  fi
-  if (( attempt == 15 || attempt == 30 || attempt == 45 )); then
-    systemctl restart systemd-networkd >/dev/null 2>&1 || true
-    networkctl reconfigure eth0 >/dev/null 2>&1 || true
-  fi
-  sleep 2
-done
-
-if ! ip -4 -o addr show dev eth0 scope global | grep -q 'inet '; then
-  echo 'ERREUR : aucune adresse IPv4 obtenue sur eth0.'
-  echo 'État de l’interface :'; ip -br addr show eth0 || true
-  echo 'État networkd :'; networkctl status eth0 --no-pager || true
-  echo 'Configuration réseau :'; find /etc/systemd/network /etc/netplan -maxdepth 2 -type f -print -exec cat {} \; 2>/dev/null || true
-  exit 1
-fi
-
-if ! ip route show default | grep -q '^default '; then
-  echo 'ERREUR : aucune route par défaut obtenue par DHCP.'
-  ip route || true
-  exit 1
-fi
-
+for i in {1..60}; do ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default ' && break; (( i%15 )) || { systemctl restart systemd-networkd >/dev/null 2>&1 || true; networkctl reconfigure eth0 >/dev/null 2>&1 || true; }; sleep 2; done
+ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; networkctl status eth0 --no-pager || true; exit 1; }
+ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; exit 1; }
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
-printf '[RÉSEAU] Vérification de la résolution DNS avec %s...\n' "$DNS_SERVER"
-for _ in {1..20}; do
-  getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 && break
-  sleep 2
-done
-getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 || {
-  echo "ERREUR : impossible de résoudre archive.ubuntu.com avec le DNS $DNS_SERVER."
-  echo 'Adresse IPv4 :'; ip -4 addr show dev eth0 || true
-  echo 'Route :'; ip route || true
-  echo 'DNS :'; cat /etc/resolv.conf || true
-  exit 1
-}
-
+getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
 apt-get update
 apt-get full-upgrade -y
 apt-get install -y acl apache2 ca-certificates curl debconf-utils libapache2-mod-php mariadb-client mariadb-server openssh-server php php-apcu php-bcmath php-cli php-common php-curl php-gd php-imagick php-intl php-mbstring php-mysql php-opcache php-soap php-xml php-zip samba samba-common-bin sudo unattended-upgrades
-id "$ADMIN_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$ADMIN_USER"
+id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ADMIN_USER"
 printf '%s:%s\n' "$ADMIN_USER" "$ADMIN_PASSWORD" | chpasswd
 usermod -aG sudo "$ADMIN_USER"
 mkdir -p /etc/ssh/sshd_config.d
-printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication no\nPermitRootLogin no\nUsePAM yes\n' > /etc/ssh/sshd_config.d/99-lxc-web.conf
-sshd -t; systemctl enable --now ssh
-a2enmod rewrite headers expires ssl
+printf 'PasswordAuthentication yes\nPermitRootLogin no\nUsePAM yes\n' >/etc/ssh/sshd_config.d/99-lxc-web.conf
+systemctl enable --now ssh apache2 mariadb
 rm -f /var/www/html/index.html
-cat > /var/www/html/index.php <<'PHP'
-<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Serveur Web Ubuntu</title></head><body><h1>Serveur Web Ubuntu</h1><p>Apache et PHP sont opérationnels.</p></body></html>
-PHP
-systemctl enable --now apache2
-systemctl enable --now mariadb
+printf '%s\n' '<!doctype html><html lang="fr"><meta charset="utf-8"><title>Serveur Web Ubuntu</title><h1>Serveur Web Ubuntu</h1><p>Apache et PHP sont opérationnels.</p>' >/var/www/html/index.php
 SQL_USER=${DB_ADMIN_USER//\'/\'\'}; SQL_PASSWORD=${DB_ADMIN_PASSWORD//\'/\'\'}
-mariadb --protocol=socket <<SQL
+mariadb <<SQL
 CREATE USER IF NOT EXISTS '${SQL_USER}'@'localhost' IDENTIFIED BY '${SQL_PASSWORD}';
-ALTER USER '${SQL_USER}'@'localhost' IDENTIFIED BY '${SQL_PASSWORD}';
 GRANT ALL PRIVILEGES ON *.* TO '${SQL_USER}'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 SQL
-echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
-echo "phpmyadmin phpmyadmin/dbconfig-install boolean false" | debconf-set-selections
+echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections
+echo 'phpmyadmin phpmyadmin/dbconfig-install boolean false' | debconf-set-selections
 apt-get install -y phpmyadmin
 getent group webdev >/dev/null || groupadd webdev
 usermod -aG webdev "$ADMIN_USER"; usermod -aG webdev www-data
 chown -R "$ADMIN_USER:webdev" /var/www/html
 find /var/www/html -type d -exec chmod 2775 {} \;
 find /var/www/html -type f -exec chmod 0664 {} \;
-cat >> /etc/samba/smb.conf <<EOF3
-
+cat >>/etc/samba/smb.conf <<SMB
 [Web]
  path = /var/www/html
  browseable = yes
@@ -302,60 +111,54 @@ cat >> /etc/samba/smb.conf <<EOF3
  force group = webdev
  create mask = 0664
  directory mask = 2775
-EOF3
+SMB
 printf '%s\n%s\n' "$ADMIN_PASSWORD" "$ADMIN_PASSWORD" | smbpasswd -s -a "$ADMIN_USER"
 systemctl enable --now smbd
 installer=$(mktemp); curl -fsSL https://code-server.dev/install.sh -o "$installer"; chmod 700 "$installer"; "$installer"; rm -f "$installer"
 mkdir -p "/home/$ADMIN_USER/.config/code-server"
-cat > "/home/$ADMIN_USER/.config/code-server/config.yaml" <<EOF4
+cat >"/home/$ADMIN_USER/.config/code-server/config.yaml" <<CFG
 bind-addr: 0.0.0.0:8680
 auth: password
 password: "$CODE_SERVER_PASSWORD"
 cert: false
 disable-telemetry: true
-EOF4
+CFG
 chown -R "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.config"
 chmod 600 "/home/$ADMIN_USER/.config/code-server/config.yaml"
 systemctl enable --now "code-server@$ADMIN_USER.service"
 rm -f /root/.lxc-web-install-credentials
 INNER
-  chmod 700 "$INNER_SCRIPT"
-}
+chmod 700 "$INNER_SCRIPT"; }
+install_inside(){ msg_info "Démarrage du conteneur..."; pct start "$CTID"; for _ in {1..60}; do pct exec "$CTID" -- true >/dev/null 2>&1 && break; sleep 2; done; pct push "$CTID" "$INNER_SCRIPT" /root/install-applications.sh --perms 700; pct push "$CTID" "$CREDS" /root/.lxc-web-install-credentials --perms 600; msg_info "Installation des applications..."; pct exec "$CTID" -- bash /root/install-applications.sh; pct exec "$CTID" -- rm -f /root/install-applications.sh /root/.lxc-web-install-credentials; msg_ok "Applications installées."; }
+container_ip(){ pct exec "$CTID" -- sh -c "ip -4 -o addr show dev eth0 scope global | awk '{print \\$4}' | cut -d/ -f1 | head -n1" 2>/dev/null || true; }
+escape_notes(){ local v="$1"; v=${v//&/&amp;}; v=${v//</&lt;}; v=${v//>/&gt;}; printf '%s' "$v"; }
+write_notes(){ local ip="$1" h au ap du dp cp rp notes; h=$(escape_notes "$HOSTNAME"); au=$(escape_notes "$ADMIN_USER"); ap=$(escape_notes "$ADMIN_PASSWORD"); du=$(escape_notes "$DB_ADMIN_USER"); dp=$(escape_notes "$DB_ADMIN_PASSWORD"); cp=$(escape_notes "$CODE_SERVER_PASSWORD"); rp=$(escape_notes "$CT_ROOT_PASSWORD"); notes="<div align='center'>
 
-install_inside_container(){
-  msg_info "Démarrage du conteneur..."; pct start "$CTID"
-  for _ in {1..60}; do pct exec "$CTID" -- true >/dev/null 2>&1 && break; sleep 2; done
-  pct exec "$CTID" -- true >/dev/null 2>&1 || { msg_err "Le conteneur ne répond pas."; exit 1; }
-  pct push "$CTID" "$INNER_SCRIPT" /root/install-applications.sh --perms 700
-  pct push "$CTID" "$CREDS" /root/.lxc-web-install-credentials --perms 600
-  msg_info "Installation des applications..."
-  pct exec "$CTID" -- bash /root/install-applications.sh
-  pct exec "$CTID" -- rm -f /root/install-applications.sh /root/.lxc-web-install-credentials
-  msg_ok "Applications installées."
-}
+# ${h}
 
-container_ip(){ pct exec "$CTID" -- sh -c "ip -4 -o addr show dev eth0 scope global | awk '{print \$4}' | cut -d/ -f1 | head -n1" 2>/dev/null || true; }
-finish(){
-  local ip; ip=$(container_ip); ip=${ip:-"adresse non détectée"}; CT_CREATION_STARTED=0
-  wt_msg "INSTALLATION TERMINÉE" "Le conteneur est prêt.\n\nVMID : $CTID\nNom : $HOSTNAME\nAdresse IP : $ip\n\nApache : http://$ip\nphpMyAdmin : http://$ip/phpmyadmin\ncode-server : http://$ip:8680\nSamba : \\\\$ip\\Web\nSSH : $ADMIN_USER@$ip\n\nJournal : $LOG_FILE"
-  msg_ok "LXC $CTID prêt : http://$ip"
-}
+</div>
 
-main(){
-  require_environment
-  touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1
-  set_defaults
-  choose_mode
-  choose_storages
-  [[ "$MODE" == "2" ]] && advanced_configuration
-  validate_bridge
-  validate_storage_combination
-  credentials_configuration
-  confirm_configuration
-  download_template
-  build_installer
-  create_container
-  install_inside_container
-  finish
-}
+## Services
+- Apache — http://${ip}
+- PHP 8.3
+- MariaDB
+- phpMyAdmin — http://${ip}/phpmyadmin
+- code-server / VS Code — http://${ip}:8680
+- Serveur SMB — \\\\${ip}\\Web
+- SSH — port 22
+
+## Identifiants
+- Root LXC : root / ${rp}
+- Linux, SSH et SMB : ${au} / ${ap}
+- MariaDB et phpMyAdmin : ${du} / ${dp}
+- code-server : ${cp}
+
+## Réseau
+- Adresse IP : ${ip}
+- DNS : ${DNS_SERVER}
+- Bridge : ${BRIDGE}
+- VLAN : ${VLAN_TAG}
+"; pct set "$CTID" --description "$notes" >/dev/null; msg_ok "Notes Proxmox renseignées."; }
+finish(){ local ip; ip=$(container_ip); ip=${ip:-adresse_non_detectee}; write_notes "$ip"; CT_CREATION_STARTED=0; wt_msg "INSTALLATION TERMINÉE" "Conteneur prêt.\n\nVMID : $CTID\nNom : $HOSTNAME\nIP : $ip\n\nApache : http://$ip\nphpMyAdmin : http://$ip/phpmyadmin\ncode-server : http://$ip:8680\nSamba : \\\\$ip\\Web\nSSH : $ADMIN_USER@$ip"; msg_ok "LXC $CTID prêt : http://$ip"; }
+main(){ require_environment; touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1; set_defaults; choose_mode; choose_storages; [[ "$MODE" == 2 ]] && advanced_configuration; validate_bridge; validate_storage; credentials; confirm; download_template; build_installer; create_container; install_inside; finish; }
 main "$@"
