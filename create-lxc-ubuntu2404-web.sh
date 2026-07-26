@@ -51,7 +51,9 @@ passwordbox(){
 
 require_environment(){
   [[ $EUID -eq 0 ]] || { msg_err "Exécute ce script en root sur un nœud Proxmox VE."; exit 1; }
-  for cmd in pct qm pveam pvesm pvesh whiptail; do command -v "$cmd" >/dev/null 2>&1 || { msg_err "Commande manquante : $cmd"; exit 1; }; done
+  for cmd in pct qm pveam pvesm pvesh whiptail; do
+    command -v "$cmd" >/dev/null 2>&1 || { msg_err "Commande manquante : $cmd"; exit 1; }
+  done
   [[ -r /dev/tty && -w /dev/tty ]] || { msg_err "Terminal interactif indisponible."; exit 1; }
 }
 
@@ -67,7 +69,6 @@ storage_type(){
     ' /etc/pve/storage.cfg 2>/dev/null) || true
   fi
   printf '%s' "$type"
-  return 0
 }
 
 storage_menu(){
@@ -92,13 +93,11 @@ validate_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie n'est pas valide ou est déjà utilisée."; done; }
 
 set_defaults(){
-  local host_dns
-  host_dns=$(awk '/^nameserver[[:space:]]+/ && $2 !~ /^127\./ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)
   CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100)
   HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"
   CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32
   BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""
-  DNS_SERVER="${host_dns:-1.1.1.1}"; DNS_SEARCH="local"; ONBOOT=1; UNPRIVILEGED=1
+  DNS_SERVER="8.8.8.8"; DNS_SEARCH=""; ONBOOT=1; UNPRIVILEGED=1; FIREWALL=0
 }
 
 choose_mode(){
@@ -121,15 +120,21 @@ advanced_configuration(){
   DISK_GB=$(ask_valid "Disque" "Taille du disque racine en Go." "$DISK_GB" validate_uint)
   BRIDGE=$(inputbox "Bridge réseau" "Bridge Proxmox utilisé par le conteneur." "$BRIDGE")
   VLAN_TAG=$(ask_valid "VLAN" "Tag VLAN. Utilise 0 pour aucun VLAN." "$VLAN_TAG" validate_uint)
-  if wt_yesno "Réseau" "Utiliser une adresse IPv4 attribuée par DHCP ?"; then NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""; else
+  if wt_yesno "Réseau" "Utiliser une adresse IPv4 attribuée par DHCP ?"; then
+    NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""
+  else
     NETWORK_MODE="static"
     NET_IP=$(ask_valid "Adresse IPv4" "Adresse IPv4 avec préfixe." "192.168.1.50/24" validate_cidr)
     GATEWAY=$(ask_valid "Passerelle" "Passerelle IPv4." "192.168.1.1" validate_ip)
   fi
   DNS_SERVER=$(ask_valid "DNS" "Serveur DNS IPv4." "$DNS_SERVER" validate_ip)
-  DNS_SEARCH=$(inputbox "Recherche DNS" "Domaine de recherche DNS." "$DNS_SEARCH")
+  wt_yesno "Pare-feu Proxmox" "Activer le pare-feu Proxmox sur l'interface réseau du conteneur ?" && FIREWALL=1 || FIREWALL=0
   wt_yesno "Démarrage automatique" "Démarrer automatiquement le conteneur avec Proxmox ?" && ONBOOT=1 || ONBOOT=0
   wt_yesno "Isolation" "Créer un conteneur non privilégié ?\n\nC'est le choix recommandé." && UNPRIVILEGED=1 || UNPRIVILEGED=0
+}
+
+validate_bridge(){
+  ip link show "$BRIDGE" >/dev/null 2>&1 || { wt_msg "Bridge introuvable" "Le bridge '$BRIDGE' n'existe pas sur ce nœud Proxmox."; exit 1; }
 }
 
 validate_storage_combination(){
@@ -155,10 +160,11 @@ credentials_configuration(){
 }
 
 confirm_configuration(){
-  local privilege startup
+  local privilege startup fw
   (( UNPRIVILEGED == 1 )) && privilege="Non privilégié" || privilege="Privilégié"
   (( ONBOOT == 1 )) && startup="Oui" || startup="Non"
-  wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nStockage template : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\nIsolation : $privilege\nDémarrage automatique : $startup\n\nCréer maintenant ce conteneur ?" || exit 0
+  (( FIREWALL == 1 )) && fw="Activé" || fw="Désactivé"
+  wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nStockage template : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\nPare-feu interface : $fw\nIsolation : $privilege\nDémarrage automatique : $startup\n\nCréer maintenant ce conteneur ?" || exit 0
 }
 
 download_template(){
@@ -167,18 +173,21 @@ download_template(){
   TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-24\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1)
   [[ -n "$TEMPLATE_NAME" ]] || { msg_err "Template Ubuntu 24.04 introuvable."; exit 1; }
   TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
-  if ! pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME"; then msg_info "Téléchargement de $TEMPLATE_NAME..."; pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"; fi
+  if ! pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME"; then
+    msg_info "Téléchargement de $TEMPLATE_NAME..."
+    pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"
+  fi
   msg_ok "Template prêt."
 }
 
 create_container(){
-  local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=1,type=veth"
+  local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"
   [[ "$NETWORK_MODE" == "static" ]] && net0+=",gw=${GATEWAY}"
   (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"
   msg_info "Création du conteneur LXC $CTID..."; CT_CREATION_STARTED=1
   pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 \
     --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" \
-    --net0 "$net0" --nameserver "$DNS_SERVER" --searchdomain "$DNS_SEARCH" --password "$CT_ROOT_PASSWORD" \
+    --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" \
     --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0 \
     --description "LXC Ubuntu 24.04 LTS - Apache, PHP, MariaDB, phpMyAdmin, Samba, code-server et SSH"
   msg_ok "Conteneur créé."
@@ -205,19 +214,40 @@ ADMIN_PASSWORD=$(printf '%s' "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf '%s' "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf '%s' "$CODE_SERVER_PASSWORD_B64" | base64 -d)
 
-printf '[RÉSEAU] Attente d’une adresse IPv4 et d’une route par défaut...\n'
-for _ in {1..60}; do
-  if ip -4 -o addr show dev eth0 | grep -q 'inet ' && ip route show default | grep -q '^default '; then
+printf '[RÉSEAU] Initialisation de l’interface eth0...\n'
+ip link set eth0 up || true
+systemctl restart systemd-networkd >/dev/null 2>&1 || true
+networkctl reconfigure eth0 >/dev/null 2>&1 || true
+
+printf '[RÉSEAU] Attente d’une adresse IPv4 attribuée par DHCP...\n'
+for attempt in {1..60}; do
+  if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
     break
+  fi
+  if (( attempt == 15 || attempt == 30 || attempt == 45 )); then
+    systemctl restart systemd-networkd >/dev/null 2>&1 || true
+    networkctl reconfigure eth0 >/dev/null 2>&1 || true
   fi
   sleep 2
 done
-ip -4 -o addr show dev eth0 | grep -q 'inet ' || { echo 'ERREUR : aucune adresse IPv4 obtenue sur eth0.'; exit 1; }
-ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut disponible.'; exit 1; }
+
+if ! ip -4 -o addr show dev eth0 scope global | grep -q 'inet '; then
+  echo 'ERREUR : aucune adresse IPv4 obtenue sur eth0.'
+  echo 'État de l’interface :'; ip -br addr show eth0 || true
+  echo 'État networkd :'; networkctl status eth0 --no-pager || true
+  echo 'Configuration réseau :'; find /etc/systemd/network /etc/netplan -maxdepth 2 -type f -print -exec cat {} \; 2>/dev/null || true
+  exit 1
+fi
+
+if ! ip route show default | grep -q '^default '; then
+  echo 'ERREUR : aucune route par défaut obtenue par DHCP.'
+  ip route || true
+  exit 1
+fi
 
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
-printf '[RÉSEAU] Vérification de la résolution DNS...\n'
-for _ in {1..30}; do
+printf '[RÉSEAU] Vérification de la résolution DNS avec %s...\n' "$DNS_SERVER"
+for _ in {1..20}; do
   getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 && break
   sleep 2
 done
@@ -304,7 +334,7 @@ install_inside_container(){
   msg_ok "Applications installées."
 }
 
-container_ip(){ pct exec "$CTID" -- sh -c "ip -4 -o addr show dev eth0 | awk '{print \$4}' | cut -d/ -f1 | head -n1" 2>/dev/null || true; }
+container_ip(){ pct exec "$CTID" -- sh -c "ip -4 -o addr show dev eth0 scope global | awk '{print \$4}' | cut -d/ -f1 | head -n1" 2>/dev/null || true; }
 finish(){
   local ip; ip=$(container_ip); ip=${ip:-"adresse non détectée"}; CT_CREATION_STARTED=0
   wt_msg "INSTALLATION TERMINÉE" "Le conteneur est prêt.\n\nVMID : $CTID\nNom : $HOSTNAME\nAdresse IP : $ip\n\nApache : http://$ip\nphpMyAdmin : http://$ip/phpmyadmin\ncode-server : http://$ip:8680\nSamba : \\\\$ip\\Web\nSSH : $ADMIN_USER@$ip\n\nJournal : $LOG_FILE"
@@ -318,6 +348,7 @@ main(){
   choose_mode
   choose_storages
   [[ "$MODE" == "2" ]] && advanced_configuration
+  validate_bridge
   validate_storage_combination
   credentials_configuration
   confirm_configuration
