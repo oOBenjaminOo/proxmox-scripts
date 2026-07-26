@@ -92,24 +92,29 @@ validate_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie n'est pas valide ou est déjà utilisée."; done; }
 
 set_defaults(){
+  local host_dns
+  host_dns=$(awk '/^nameserver[[:space:]]+/ && $2 !~ /^127\./ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)
   CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100)
   HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"
   CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32
   BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""
-  DNS_SERVER="1.1.1.1"; DNS_SEARCH="local"; ONBOOT=1; UNPRIVILEGED=1
+  DNS_SERVER="${host_dns:-1.1.1.1}"; DNS_SEARCH="local"; ONBOOT=1; UNPRIVILEGED=1
 }
 
 choose_mode(){
-  MODE=$(wt --title "PARAMÈTRES" --menu "Choisis le mode de configuration." 16 76 4 \
+  MODE=$(wt --title "PARAMÈTRES" --menu "Choisis le mode de configuration.\n\nLe stockage du conteneur et celui du template seront demandés dans les deux modes." 18 80 4 \
     "1" "Paramètres par défaut" "2" "Paramètres avancés" "3" "Quitter" --default-item "1") || exit 0
   [[ "$MODE" != "3" ]] || exit 0
+}
+
+choose_storages(){
+  ROOTFS_STORAGE=$(storage_menu rootdir "Stockage du conteneur" "$ROOTFS_STORAGE") || exit 0
+  TEMPLATE_STORAGE=$(storage_menu vztmpl "Stockage du template" "$TEMPLATE_STORAGE") || exit 0
 }
 
 advanced_configuration(){
   CTID=$(ask_valid "VMID" "Identifiant du conteneur LXC." "$CTID" validate_id)
   HOSTNAME=$(ask_valid "Nom du conteneur" "Nom d'hôte du nouveau conteneur." "$HOSTNAME" validate_hostname)
-  ROOTFS_STORAGE=$(storage_menu rootdir "Stockage du conteneur" "$ROOTFS_STORAGE") || exit 0
-  TEMPLATE_STORAGE=$(storage_menu vztmpl "Stockage du template" "$TEMPLATE_STORAGE") || exit 0
   CPU_CORES=$(ask_valid "CPU" "Nombre de cœurs CPU." "$CPU_CORES" validate_uint)
   MEMORY_MB=$(ask_valid "Mémoire" "Mémoire vive en Mo." "$MEMORY_MB" validate_uint)
   SWAP_MB=$(ask_valid "Swap" "Mémoire swap en Mo." "$SWAP_MB" validate_uint)
@@ -153,7 +158,7 @@ confirm_configuration(){
   local privilege startup
   (( UNPRIVILEGED == 1 )) && privilege="Non privilégié" || privilege="Privilégié"
   (( ONBOOT == 1 )) && startup="Oui" || startup="Non"
-  wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nStockage template : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nIsolation : $privilege\nDémarrage automatique : $startup\n\nCréer maintenant ce conteneur ?" || exit 0
+  wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nStockage template : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\nIsolation : $privilege\nDémarrage automatique : $startup\n\nCréer maintenant ce conteneur ?" || exit 0
 }
 
 download_template(){
@@ -187,6 +192,7 @@ ADMIN_PASSWORD_B64='$(printf '%s' "$ADMIN_PASSWORD" | base64 -w0)'
 DB_ADMIN_USER='$DB_ADMIN_USER'
 DB_ADMIN_PASSWORD_B64='$(printf '%s' "$DB_ADMIN_PASSWORD" | base64 -w0)'
 CODE_SERVER_PASSWORD_B64='$(printf '%s' "$CODE_SERVER_PASSWORD" | base64 -w0)'
+DNS_SERVER='$DNS_SERVER'
 EOF2
   chmod 600 "$CREDS"
   cat > "$INNER_SCRIPT" <<'INNER'
@@ -198,6 +204,31 @@ source /root/.lxc-web-install-credentials
 ADMIN_PASSWORD=$(printf '%s' "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf '%s' "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf '%s' "$CODE_SERVER_PASSWORD_B64" | base64 -d)
+
+printf '[RÉSEAU] Attente d’une adresse IPv4 et d’une route par défaut...\n'
+for _ in {1..60}; do
+  if ip -4 -o addr show dev eth0 | grep -q 'inet ' && ip route show default | grep -q '^default '; then
+    break
+  fi
+  sleep 2
+done
+ip -4 -o addr show dev eth0 | grep -q 'inet ' || { echo 'ERREUR : aucune adresse IPv4 obtenue sur eth0.'; exit 1; }
+ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut disponible.'; exit 1; }
+
+printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
+printf '[RÉSEAU] Vérification de la résolution DNS...\n'
+for _ in {1..30}; do
+  getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 && break
+  sleep 2
+done
+getent ahostsv4 archive.ubuntu.com >/dev/null 2>&1 || {
+  echo "ERREUR : impossible de résoudre archive.ubuntu.com avec le DNS $DNS_SERVER."
+  echo 'Adresse IPv4 :'; ip -4 addr show dev eth0 || true
+  echo 'Route :'; ip route || true
+  echo 'DNS :'; cat /etc/resolv.conf || true
+  exit 1
+}
+
 apt-get update
 apt-get full-upgrade -y
 apt-get install -y acl apache2 ca-certificates curl debconf-utils libapache2-mod-php mariadb-client mariadb-server openssh-server php php-apcu php-bcmath php-cli php-common php-curl php-gd php-imagick php-intl php-mbstring php-mysql php-opcache php-soap php-xml php-zip samba samba-common-bin sudo unattended-upgrades
@@ -283,8 +314,17 @@ finish(){
 main(){
   require_environment
   touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1
-  set_defaults; choose_mode; [[ "$MODE" == "2" ]] && advanced_configuration
-  validate_storage_combination; credentials_configuration; confirm_configuration
-  download_template; build_installer; create_container; install_inside_container; finish
+  set_defaults
+  choose_mode
+  choose_storages
+  [[ "$MODE" == "2" ]] && advanced_configuration
+  validate_storage_combination
+  credentials_configuration
+  confirm_configuration
+  download_template
+  build_installer
+  create_container
+  install_inside_container
+  finish
 }
 main "$@"
