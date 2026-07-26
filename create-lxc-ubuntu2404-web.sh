@@ -58,6 +58,9 @@ DB_ADMIN_USER='$DB_ADMIN_USER'
 DB_ADMIN_PASSWORD_B64='$(printf %s "$DB_ADMIN_PASSWORD" | base64 -w0)'
 CODE_SERVER_PASSWORD_B64='$(printf %s "$CODE_SERVER_PASSWORD" | base64 -w0)'
 DNS_SERVER='$DNS_SERVER'
+NETWORK_MODE='$NETWORK_MODE'
+NET_IP='$NET_IP'
+GATEWAY='$GATEWAY'
 EOF
 chmod 600 "$CREDS"; cat >"$INNER_SCRIPT" <<'INNER'
 #!/usr/bin/env bash
@@ -67,12 +70,56 @@ source /root/.lxc-web-install-credentials
 ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
+
+printf '[RÉSEAU] Création de la configuration systemd-networkd pour eth0...\n'
+mkdir -p /etc/systemd/network
+rm -f /etc/systemd/network/*eth0*.network
+if [[ "$NETWORK_MODE" == "dhcp" ]]; then
+  cat >/etc/systemd/network/10-eth0.network <<EOFNET
+[Match]
+Name=eth0
+
+[Network]
+DHCP=ipv4
+DNS=$DNS_SERVER
+IPv6AcceptRA=no
+LinkLocalAddressing=ipv6
+
+[DHCPv4]
+UseDNS=no
+UseRoutes=yes
+RouteMetric=100
+EOFNET
+else
+  cat >/etc/systemd/network/10-eth0.network <<EOFNET
+[Match]
+Name=eth0
+
+[Network]
+Address=$NET_IP
+Gateway=$GATEWAY
+DNS=$DNS_SERVER
+IPv6AcceptRA=no
+LinkLocalAddressing=ipv6
+EOFNET
+fi
+chmod 644 /etc/systemd/network/10-eth0.network
+systemctl enable systemd-networkd >/dev/null 2>&1 || true
 ip link set eth0 up || true
-systemctl restart systemd-networkd >/dev/null 2>&1 || true
+networkctl reload >/dev/null 2>&1 || true
+systemctl restart systemd-networkd
 networkctl reconfigure eth0 >/dev/null 2>&1 || true
-for i in {1..60}; do ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default ' && break; (( i%15 )) || { systemctl restart systemd-networkd >/dev/null 2>&1 || true; networkctl reconfigure eth0 >/dev/null 2>&1 || true; }; sleep 2; done
-ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; networkctl status eth0 --no-pager || true; exit 1; }
-ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; exit 1; }
+
+printf '[RÉSEAU] Attente de la configuration IPv4...\n'
+for i in {1..60}; do
+  if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
+    break
+  fi
+  (( i % 15 )) || { systemctl restart systemd-networkd >/dev/null 2>&1 || true; networkctl reconfigure eth0 >/dev/null 2>&1 || true; }
+  sleep 2
+done
+ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; networkctl status eth0 --no-pager || true; echo 'Fichier réseau :'; cat /etc/systemd/network/10-eth0.network || true; exit 1; }
+ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; ip route; exit 1; }
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
 getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
 apt-get update
