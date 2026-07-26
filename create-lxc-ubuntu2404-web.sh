@@ -79,9 +79,28 @@ source /root/.lxc-web-install-credentials
 ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
-printf '[RÉSEAU] Attente de la configuration IPv4 native de Proxmox...\n'
-for _ in {1..60}; do ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default ' && break; sleep 2; done
-ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; ip link show eth0 || true; ip addr show eth0 || true; ip route || true; systemctl --no-pager --failed || true; cat /etc/network/interfaces 2>/dev/null || true; find /etc/systemd/network /run/systemd/network -maxdepth 1 -type f -print -exec cat {} \; 2>/dev/null || true; exit 1; }
+
+printf '[RÉSEAU] Activation de eth0 et de systemd-networkd...\n'
+systemctl unmask systemd-networkd.service systemd-networkd.socket >/dev/null 2>&1 || true
+systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
+ip link set dev eth0 up
+systemctl restart systemd-networkd.service
+networkctl reload >/dev/null 2>&1 || true
+networkctl reconfigure eth0 >/dev/null 2>&1 || true
+
+printf '[RÉSEAU] Attente de l’adresse IPv4 DHCP...\n'
+for i in {1..60}; do
+  if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
+    break
+  fi
+  if (( i % 15 == 0 )); then
+    ip link set dev eth0 up || true
+    systemctl restart systemd-networkd.service >/dev/null 2>&1 || true
+    networkctl reconfigure eth0 >/dev/null 2>&1 || true
+  fi
+  sleep 2
+done
+ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; ip link show eth0 || true; ip addr show eth0 || true; ip route || true; systemctl status systemd-networkd --no-pager || true; networkctl status eth0 --no-pager || true; cat /etc/systemd/network/eth0.network 2>/dev/null || true; journalctl -u systemd-networkd --no-pager -n 100 || true; exit 1; }
 ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; ip route; exit 1; }
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
 getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
