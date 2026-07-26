@@ -5,7 +5,7 @@ umask 077
 
 readonly BACKTITLE="Proxmox VE - LXC Web Ubuntu 24.04"
 LOG_FILE="/var/log/create-lxc-web-$(date '+%Y%m%d-%H%M%S').log"
-TEMP_DIR=""; CTID=""; CT_CREATION_STARTED=0; CT_MOUNTED=0
+TEMP_DIR=""; CTID=""; CT_CREATION_STARTED=0
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
 msg_info(){ echo -e "${BLUE}▶${RESET} $*"; }
 msg_ok(){ echo -e "${GREEN}✔${RESET} $*"; }
@@ -14,7 +14,6 @@ msg_err(){ echo -e "${RED}✖${RESET} $*" >&2; }
 
 cleanup(){
   local rc=$?
-  (( CT_MOUNTED == 1 )) && pct unmount "$CTID" >/dev/null 2>&1 || true
   [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
   unset CT_ROOT_PASSWORD ADMIN_PASSWORD DB_ADMIN_PASSWORD CODE_SERVER_PASSWORD || true
   if (( rc != 0 )); then
@@ -61,50 +60,9 @@ validate_bridge(){ ip link show "$BRIDGE" >/dev/null 2>&1 || { wt_msg "Bridge in
 validate_storage(){ local t; while true; do t=$(storage_type "$ROOTFS_STORAGE"); if (( UNPRIVILEGED )) && [[ "$t" == nfs || "$t" == cifs ]]; then wt_msg "Stockage incompatible" "Un LXC non privilégié peut échouer sur $ROOTFS_STORAGE ($t). Choisis un stockage local."; ROOTFS_STORAGE=$(storage_menu rootdir "Autre stockage racine" local-lvm) || exit 0; else break; fi; done; }
 advanced_credentials(){ CT_ROOT_PASSWORD=$(passwordbox "Mot de passe root" "Mot de passe root du conteneur."); while true; do ADMIN_USER=$(inputbox "Utilisateur Linux" "Compte SSH, Samba et code-server." admin); validate_user "$ADMIN_USER" && break; wt_msg "Nom invalide" "Nom Linux invalide."; done; ADMIN_PASSWORD=$(passwordbox "Mot de passe Linux" "Mot de passe de $ADMIN_USER."); while true; do DB_ADMIN_USER=$(inputbox "Utilisateur MariaDB" "Compte MariaDB/phpMyAdmin." dbadmin); validate_user "$DB_ADMIN_USER" && break; wt_msg "Nom invalide" "Nom MariaDB invalide."; done; DB_ADMIN_PASSWORD=$(passwordbox "Mot de passe MariaDB" "Mot de passe de $DB_ADMIN_USER."); CODE_SERVER_PASSWORD=$(passwordbox "Mot de passe code-server" "Mot de passe Web code-server."); }
 default_credentials(){ ADMIN_USER="admin"; DB_ADMIN_USER="dbadmin"; CT_ROOT_PASSWORD=$(random_password); ADMIN_PASSWORD=$(random_password); DB_ADMIN_PASSWORD=$(random_password); CODE_SERVER_PASSWORD=$(random_password); msg_ok "Identifiants sécurisés générés automatiquement pour le mode par défaut."; }
-configure_credentials(){ case "$MODE" in 1) default_credentials ;; 2) advanced_credentials ;; *) msg_err "Mode invalide pour les identifiants : $MODE"; exit 1 ;; esac; }
 confirm(){ local credential_mode; [[ "$MODE" == 1 ]] && credential_mode="Générés automatiquement et inscrits dans les notes Proxmox" || credential_mode="Personnalisés"; wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nTemplate : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\nUtilisateur Linux : $ADMIN_USER\nUtilisateur MariaDB : $DB_ADMIN_USER\nIdentifiants : $credential_mode\n\nCréer le conteneur ?" || exit 0; }
 download_template(){ msg_info "Recherche du template Ubuntu 24.04..."; pveam update >/dev/null; TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-24\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1); [[ -n "$TEMPLATE_NAME" ]] || { msg_err "Template introuvable."; exit 1; }; TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"; pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"; msg_ok "Template prêt."; }
-create_container(){ local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"; [[ "$NETWORK_MODE" == static ]] && net0+=",gw=${GATEWAY}"; (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"; msg_info "Création du conteneur LXC $CTID..."; CT_CREATION_STARTED=1; pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0; msg_ok "Conteneur créé."; }
-configure_guest_network(){
-  local rootfs="/var/lib/lxc/${CTID}/rootfs"
-  msg_info "Préparation de la configuration réseau Netplan..."
-  pct mount "$CTID" >/dev/null; CT_MOUNTED=1
-  mkdir -p "$rootfs/etc/netplan"
-  rm -f "$rootfs/etc/netplan/10-lxc.yaml" "$rootfs/etc/systemd/network/10-eth0.network"
-  if [[ "$NETWORK_MODE" == dhcp ]]; then
-    cat >"$rootfs/etc/netplan/10-lxc.yaml" <<EOFNET
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    eth0:
-      dhcp4: true
-      dhcp6: false
-      nameservers:
-        addresses: [$DNS_SERVER]
-EOFNET
-  else
-    cat >"$rootfs/etc/netplan/10-lxc.yaml" <<EOFNET
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    eth0:
-      dhcp4: false
-      dhcp6: false
-      addresses:
-        - $NET_IP
-      routes:
-        - to: default
-          via: $GATEWAY
-      nameservers:
-        addresses: [$DNS_SERVER]
-EOFNET
-  fi
-  chmod 600 "$rootfs/etc/netplan/10-lxc.yaml"
-  pct unmount "$CTID" >/dev/null; CT_MOUNTED=0
-  msg_ok "Configuration réseau Netplan prête avant le premier démarrage."
-}
+create_container(){ local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"; [[ "$NETWORK_MODE" == static ]] && net0+=",gw=${GATEWAY}"; (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"; msg_info "Création du conteneur LXC $CTID..."; CT_CREATION_STARTED=1; pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0; msg_ok "Conteneur créé."; msg_info "Configuration réseau Proxmox : $(pct config "$CTID" | sed -n 's/^net0: //p')"; }
 build_installer(){ TEMP_DIR=$(mktemp -d); INNER_SCRIPT="$TEMP_DIR/install.sh"; CREDS="$TEMP_DIR/credentials.env"; cat >"$CREDS" <<EOF
 ADMIN_USER='$ADMIN_USER'
 ADMIN_PASSWORD_B64='$(printf %s "$ADMIN_PASSWORD" | base64 -w0)'
@@ -121,9 +79,9 @@ source /root/.lxc-web-install-credentials
 ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
-printf '[RÉSEAU] Attente de la configuration IPv4 générée par Netplan...\n'
+printf '[RÉSEAU] Attente de la configuration IPv4 native de Proxmox...\n'
 for _ in {1..60}; do ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default ' && break; sleep 2; done
-ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; networkctl status eth0 --no-pager || true; ls -la /etc/netplan /run/systemd/network 2>/dev/null || true; cat /etc/netplan/10-lxc.yaml 2>/dev/null || true; exit 1; }
+ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; ip link show eth0 || true; ip addr show eth0 || true; ip route || true; systemctl --no-pager --failed || true; cat /etc/network/interfaces 2>/dev/null || true; find /etc/systemd/network /run/systemd/network -maxdepth 1 -type f -print -exec cat {} \; 2>/dev/null || true; exit 1; }
 ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; ip route; exit 1; }
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
 getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
@@ -212,5 +170,5 @@ write_notes(){ local ip="$1" h au ap du dp cp rp notes; h=$(escape_notes "$HOSTN
 - VLAN : ${VLAN_TAG}
 "; pct set "$CTID" --description "$notes" >/dev/null; msg_ok "Notes Proxmox renseignées."; }
 finish(){ local ip; ip=$(container_ip); ip=${ip:-adresse_non_detectee}; write_notes "$ip"; CT_CREATION_STARTED=0; wt_msg "INSTALLATION TERMINÉE" "Conteneur prêt.\n\nVMID : $CTID\nNom : $HOSTNAME\nIP : $ip\n\nApache : http://$ip\nphpMyAdmin : http://$ip/phpmyadmin\ncode-server : http://$ip:8680\nSamba : \\\\$ip\\Web\nSSH : $ADMIN_USER@$ip"; msg_ok "LXC $CTID prêt : http://$ip"; }
-main(){ require_environment; touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1; set_defaults; choose_mode; choose_storages; case "$MODE" in 1) default_credentials ;; 2) advanced_configuration; advanced_credentials ;; *) msg_err "Mode invalide : $MODE"; exit 1 ;; esac; validate_bridge; validate_storage; confirm; download_template; build_installer; create_container; configure_guest_network; install_inside; finish; }
+main(){ require_environment; touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1; set_defaults; choose_mode; choose_storages; case "$MODE" in 1) default_credentials ;; 2) advanced_configuration; advanced_credentials ;; *) msg_err "Mode invalide : $MODE"; exit 1 ;; esac; validate_bridge; validate_storage; confirm; download_template; build_installer; create_container; install_inside; finish; }
 main "$@"
