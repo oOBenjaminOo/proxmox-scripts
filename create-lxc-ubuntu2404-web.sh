@@ -33,7 +33,21 @@ inputbox(){ local v; v=$(wt --title "$1" --inputbox "$2" 12 76 "$3") || exit 0; 
 passwordbox(){ local a b; while true; do a=$(wt --title "$1" --passwordbox "$2\n\nMinimum : 8 caractères." 14 76) || exit 0; (( ${#a} >= 8 )) || { wt_msg "Valeur invalide" "Le mot de passe doit contenir au moins 8 caractères."; continue; }; b=$(wt --title "$1" --passwordbox "Confirme le mot de passe." 12 76) || exit 0; [[ "$a" == "$b" ]] && { printf '%s' "$a"; return; }; wt_msg "Erreur" "Les deux mots de passe ne correspondent pas."; done; }
 require_environment(){ [[ $EUID -eq 0 ]] || { msg_err "Exécute ce script en root sur Proxmox VE."; exit 1; }; for c in pct qm pveam pvesm pvesh whiptail; do command -v "$c" >/dev/null || { msg_err "Commande manquante : $c"; exit 1; }; done; }
 storage_type(){ local s="$1" t=""; t=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $2}') || true; [[ -n "$t" ]] || t=$(awk -v id="$s" '/^[[:alnum:]_-]+:[[:space:]]+/ {split($0,a,":"); cur=a[2]; sub(/^[[:space:]]+/,"",cur); typ=a[1]} cur==id {print typ; exit}' /etc/pve/storage.cfg 2>/dev/null || true); printf '%s' "$t"; }
-storage_menu(){ local content="$1" title="$2" def="$3" s t u; local rows=(); while read -r s; do [[ -z "$s" ]] && continue; t=$(storage_type "$s"); u=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $6" libres"}') || true; rows+=("$s" "Type: ${t:-inconnu} | ${u:-espace inconnu}"); done < <(pvesm status -content "$content" 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort -u); (( ${#rows[@]} )) || { wt_msg "Erreur" "Aucun stockage compatible avec $content."; exit 1; }; wt --title "$title" --menu "Sélectionne le stockage à utiliser." 20 88 10 "${rows[@]}" --default-item "$def"; }
+storage_menu(){
+  local content="$1" title="$2" def="$3" s t u state selected
+  local rows=()
+  while read -r s; do
+    [[ -z "$s" ]] && continue
+    t=$(storage_type "$s")
+    u=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $6" libres"}') || true
+    [[ "$s" == "$def" ]] && state="ON" || state="OFF"
+    rows+=("$s" "Type: ${t:-inconnu} | ${u:-espace inconnu}" "$state")
+  done < <(pvesm status -content "$content" 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort -u)
+  (( ${#rows[@]} )) || { wt_msg "Erreur" "Aucun stockage compatible avec $content."; exit 1; }
+  selected=$(wt --title "$title" --radiolist "Sélectionne un stockage.\n\n↑/↓ : déplacer   Espace : cocher   Tab : aller sur OK   Entrée : valider" 22 94 12 "${rows[@]}") || exit 0
+  [[ -n "$selected" ]] || { wt_msg "Sélection obligatoire" "Tu dois cocher un stockage avec la barre espace avant de valider."; storage_menu "$content" "$title" "$def"; return; }
+  printf '%s' "$selected"
+}
 validate_id(){ [[ "$1" =~ ^[1-9][0-9]{2,8}$ ]] && ! pct status "$1" >/dev/null 2>&1 && ! qm status "$1" >/dev/null 2>&1; }
 validate_hostname(){ [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$ ]]; }
 validate_user(){ [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
@@ -42,7 +56,14 @@ validate_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_cidr(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]]; }
 ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie est invalide ou déjà utilisée."; done; }
 set_defaults(){ CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100); HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"; CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32; BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""; DNS_SERVER="8.8.8.8"; ONBOOT=1; UNPRIVILEGED=1; FIREWALL=0; }
-choose_mode(){ MODE=$(wt --title "PARAMÈTRES" --menu "Choisis le mode. Les stockages sont demandés dans les deux modes." 17 80 4 "1" "Paramètres par défaut" "2" "Paramètres avancés" "3" "Quitter" --default-item "1") || exit 0; [[ "$MODE" != 3 ]] || exit 0; }
+choose_mode(){
+  MODE=$(wt --title "PARAMÈTRES" --radiolist "Choisis le mode de configuration.\n\n↑/↓ : déplacer   Espace : cocher   Tab : aller sur OK   Entrée : valider" 19 88 5 \
+    "1" "Paramètres par défaut" "ON" \
+    "2" "Paramètres avancés" "OFF" \
+    "3" "Quitter" "OFF") || exit 0
+  [[ -n "$MODE" ]] || { wt_msg "Sélection obligatoire" "Tu dois cocher un choix avec la barre espace."; choose_mode; return; }
+  [[ "$MODE" != 3 ]] || exit 0
+}
 choose_storages(){ ROOTFS_STORAGE=$(storage_menu rootdir "Stockage du conteneur" "$ROOTFS_STORAGE") || exit 0; TEMPLATE_STORAGE=$(storage_menu vztmpl "Stockage du template" "$TEMPLATE_STORAGE") || exit 0; }
 advanced_configuration(){ CTID=$(ask_valid "VMID" "Identifiant du conteneur." "$CTID" validate_id); HOSTNAME=$(ask_valid "Nom" "Nom d'hôte du conteneur." "$HOSTNAME" validate_hostname); CPU_CORES=$(ask_valid "CPU" "Nombre de cœurs." "$CPU_CORES" validate_uint); MEMORY_MB=$(ask_valid "RAM" "Mémoire en Mo." "$MEMORY_MB" validate_uint); SWAP_MB=$(ask_valid "Swap" "Swap en Mo." "$SWAP_MB" validate_uint); DISK_GB=$(ask_valid "Disque" "Taille en Go." "$DISK_GB" validate_uint); BRIDGE=$(inputbox "Bridge" "Bridge Proxmox." "$BRIDGE"); VLAN_TAG=$(ask_valid "VLAN" "0 pour aucun VLAN." "$VLAN_TAG" validate_uint); if wt_yesno "Réseau" "Utiliser DHCP ?"; then NETWORK_MODE=dhcp; NET_IP=dhcp; GATEWAY=""; else NETWORK_MODE=static; NET_IP=$(ask_valid "IPv4" "Adresse avec préfixe." "192.168.1.50/24" validate_cidr); GATEWAY=$(ask_valid "Passerelle" "Passerelle IPv4." "192.168.1.1" validate_ip); fi; DNS_SERVER=$(ask_valid "DNS" "Serveur DNS IPv4." "$DNS_SERVER" validate_ip); wt_yesno "Pare-feu" "Activer le pare-feu Proxmox sur l'interface ?" && FIREWALL=1 || FIREWALL=0; wt_yesno "Démarrage" "Démarrer automatiquement avec Proxmox ?" && ONBOOT=1 || ONBOOT=0; wt_yesno "Isolation" "Créer un LXC non privilégié ?" && UNPRIVILEGED=1 || UNPRIVILEGED=0; }
 validate_bridge(){ ip link show "$BRIDGE" >/dev/null 2>&1 || { wt_msg "Bridge introuvable" "Le bridge $BRIDGE n'existe pas."; exit 1; }; }
@@ -70,31 +91,26 @@ source /root/.lxc-web-install-credentials
 ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
-
-printf '[RÉSEAU] Création de la configuration systemd-networkd pour eth0...\n'
 mkdir -p /etc/systemd/network
 rm -f /etc/systemd/network/*eth0*.network
 if [[ "$NETWORK_MODE" == "dhcp" ]]; then
-  cat >/etc/systemd/network/10-eth0.network <<EOFNET
+cat >/etc/systemd/network/10-eth0.network <<EOFNET
 [Match]
 Name=eth0
-
 [Network]
 DHCP=ipv4
 DNS=$DNS_SERVER
 IPv6AcceptRA=no
 LinkLocalAddressing=ipv6
-
 [DHCPv4]
 UseDNS=no
 UseRoutes=yes
 RouteMetric=100
 EOFNET
 else
-  cat >/etc/systemd/network/10-eth0.network <<EOFNET
+cat >/etc/systemd/network/10-eth0.network <<EOFNET
 [Match]
 Name=eth0
-
 [Network]
 Address=$NET_IP
 Gateway=$GATEWAY
@@ -109,16 +125,8 @@ ip link set eth0 up || true
 networkctl reload >/dev/null 2>&1 || true
 systemctl restart systemd-networkd
 networkctl reconfigure eth0 >/dev/null 2>&1 || true
-
-printf '[RÉSEAU] Attente de la configuration IPv4...\n'
-for i in {1..60}; do
-  if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
-    break
-  fi
-  (( i % 15 )) || { systemctl restart systemd-networkd >/dev/null 2>&1 || true; networkctl reconfigure eth0 >/dev/null 2>&1 || true; }
-  sleep 2
-done
-ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; networkctl status eth0 --no-pager || true; echo 'Fichier réseau :'; cat /etc/systemd/network/10-eth0.network || true; exit 1; }
+for i in {1..60}; do ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default ' && break; (( i % 15 )) || { systemctl restart systemd-networkd >/dev/null 2>&1 || true; networkctl reconfigure eth0 >/dev/null 2>&1 || true; }; sleep 2; done
+ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; networkctl status eth0 --no-pager || true; cat /etc/systemd/network/10-eth0.network || true; exit 1; }
 ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; ip route; exit 1; }
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
 getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
