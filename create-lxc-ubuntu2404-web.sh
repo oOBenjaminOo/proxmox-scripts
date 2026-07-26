@@ -59,7 +59,7 @@ validate_uint(){ [[ "$1" =~ ^[0-9]+$ ]]; }
 validate_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_cidr(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]]; }
 ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie est invalide ou déjà utilisée."; done; }
-random_password(){ tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8; }
+random_password(){ local p=""; while (( ${#p} < 8 )); do p+=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8 || true); done; printf '%s' "${p:0:8}"; }
 
 set_defaults(){ CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100); HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"; CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32; BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""; DNS_SERVER="8.8.8.8"; ONBOOT=1; UNPRIVILEGED=1; FIREWALL=0; ADMIN_USER="admin"; DB_ADMIN_USER="dbadmin"; }
 
@@ -128,44 +128,91 @@ source /root/.lxc-web-install-credentials
 ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
+INSTALL_LOG="/var/log/lxc-web-install.log"
+TOTAL_STEPS=9
+CURRENT_STEP=0
+: >"$INSTALL_LOG"
 
-printf '[RÉSEAU] Attente de la configuration IPv4 native de Proxmox...\n'
-for _ in {1..60}; do
-  if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
-    break
+run_step(){
+  local title="$1" function_name="$2"
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  printf '\n[%d/%d] %s\n' "$CURRENT_STEP" "$TOTAL_STEPS" "$title"
+  printf '  ⏳ En cours...\n'
+  if "$function_name" >>"$INSTALL_LOG" 2>&1; then
+    printf '  ✔ Terminée\n'
+  else
+    printf '  ✖ Échec\n'
+    printf '\nDernières lignes du journal :\n'
+    tail -n 30 "$INSTALL_LOG" || true
+    exit 1
   fi
-  sleep 2
-done
-ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; ip link show eth0 || true; ip addr show eth0 || true; ip route || true; systemctl status systemd-networkd --no-pager || true; networkctl status eth0 --no-pager || true; stat /etc/systemd/network/eth0.network 2>/dev/null || true; cat /etc/systemd/network/eth0.network 2>/dev/null || true; journalctl -u systemd-networkd --no-pager -n 100 || true; exit 1; }
-ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; ip route; exit 1; }
-printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
-getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
-apt-get update
-apt-get full-upgrade -y
-apt-get install -y acl apache2 ca-certificates curl debconf-utils libapache2-mod-php mariadb-client mariadb-server openssh-server php php-apcu php-bcmath php-cli php-common php-curl php-gd php-imagick php-intl php-mbstring php-mysql php-opcache php-soap php-xml php-zip samba samba-common-bin sudo unattended-upgrades
-id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ADMIN_USER"
-printf '%s:%s\n' "$ADMIN_USER" "$ADMIN_PASSWORD" | chpasswd
-usermod -aG sudo "$ADMIN_USER"
-mkdir -p /etc/ssh/sshd_config.d
-printf 'PasswordAuthentication yes\nPermitRootLogin no\nUsePAM yes\n' >/etc/ssh/sshd_config.d/99-lxc-web.conf
-systemctl enable --now ssh apache2 mariadb
-rm -f /var/www/html/index.html
-printf '%s\n' '<!doctype html><html lang="fr"><meta charset="utf-8"><title>Serveur Web Ubuntu</title><h1>Serveur Web Ubuntu</h1><p>Apache et PHP sont opérationnels.</p>' >/var/www/html/index.php
-SQL_USER=${DB_ADMIN_USER//\'/\'\'}; SQL_PASSWORD=${DB_ADMIN_PASSWORD//\'/\'\'}
-mariadb <<SQL
+}
+
+step_network(){
+  for _ in {1..60}; do
+    if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
+      break
+    fi
+    sleep 2
+  done
+  ip -4 -o addr show dev eth0 scope global | grep -q 'inet '
+  ip route show default | grep -q '^default '
+  printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
+  getent ahostsv4 archive.ubuntu.com >/dev/null
+}
+
+step_system(){
+  apt-get update
+  apt-get full-upgrade -y
+  apt-get install -y ca-certificates curl sudo unattended-upgrades
+}
+
+step_apache_php(){
+  apt-get install -y acl apache2 libapache2-mod-php php php-apcu php-bcmath php-cli php-common php-curl php-gd php-imagick php-intl php-mbstring php-mysql php-opcache php-soap php-xml php-zip
+  systemctl enable --now apache2
+  rm -f /var/www/html/index.html
+  printf '%s\n' '<!doctype html><html lang="fr"><meta charset="utf-8"><title>Serveur Web Ubuntu</title><h1>Serveur Web Ubuntu</h1><p>Apache et PHP sont opérationnels.</p>' >/var/www/html/index.php
+}
+
+step_mariadb(){
+  apt-get install -y mariadb-client mariadb-server
+  systemctl enable --now mariadb
+  SQL_USER=${DB_ADMIN_USER//\'/\'\'}
+  SQL_PASSWORD=${DB_ADMIN_PASSWORD//\'/\'\'}
+  mariadb <<SQL
 CREATE USER IF NOT EXISTS '${SQL_USER}'@'localhost' IDENTIFIED BY '${SQL_PASSWORD}';
 GRANT ALL PRIVILEGES ON *.* TO '${SQL_USER}'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 SQL
-echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections
-echo 'phpmyadmin phpmyadmin/dbconfig-install boolean false' | debconf-set-selections
-apt-get install -y phpmyadmin
-getent group webdev >/dev/null || groupadd webdev
-usermod -aG webdev "$ADMIN_USER"; usermod -aG webdev www-data
-chown -R "$ADMIN_USER:webdev" /var/www/html
-find /var/www/html -type d -exec chmod 2775 {} \;
-find /var/www/html -type f -exec chmod 0664 {} \;
-cat >>/etc/samba/smb.conf <<SMB
+}
+
+step_ssh_user(){
+  apt-get install -y openssh-server
+  id "$ADMIN_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$ADMIN_USER"
+  printf '%s:%s\n' "$ADMIN_USER" "$ADMIN_PASSWORD" | chpasswd
+  usermod -aG sudo "$ADMIN_USER"
+  mkdir -p /etc/ssh/sshd_config.d
+  printf 'PasswordAuthentication yes\nPermitRootLogin no\nUsePAM yes\n' >/etc/ssh/sshd_config.d/99-lxc-web.conf
+  systemctl enable --now ssh
+}
+
+step_phpmyadmin(){
+  apt-get install -y debconf-utils
+  echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections
+  echo 'phpmyadmin phpmyadmin/dbconfig-install boolean false' | debconf-set-selections
+  apt-get install -y phpmyadmin
+  systemctl reload apache2
+}
+
+step_samba(){
+  apt-get install -y samba samba-common-bin
+  getent group webdev >/dev/null || groupadd webdev
+  usermod -aG webdev "$ADMIN_USER"
+  usermod -aG webdev www-data
+  chown -R "$ADMIN_USER:webdev" /var/www/html
+  find /var/www/html -type d -exec chmod 2775 {} \;
+  find /var/www/html -type f -exec chmod 0664 {} \;
+  cat >>/etc/samba/smb.conf <<SMB
 [Web]
  path = /var/www/html
  browseable = yes
@@ -177,21 +224,50 @@ cat >>/etc/samba/smb.conf <<SMB
  create mask = 0664
  directory mask = 2775
 SMB
-printf '%s\n%s\n' "$ADMIN_PASSWORD" "$ADMIN_PASSWORD" | smbpasswd -s -a "$ADMIN_USER"
-systemctl enable --now smbd
-installer=$(mktemp); curl -fsSL https://code-server.dev/install.sh -o "$installer"; chmod 700 "$installer"; "$installer"; rm -f "$installer"
-mkdir -p "/home/$ADMIN_USER/.config/code-server"
-cat >"/home/$ADMIN_USER/.config/code-server/config.yaml" <<CFG
+  printf '%s\n%s\n' "$ADMIN_PASSWORD" "$ADMIN_PASSWORD" | smbpasswd -s -a "$ADMIN_USER"
+  systemctl enable --now smbd
+}
+
+step_code_server(){
+  local installer
+  installer=$(mktemp)
+  curl -fsSL https://code-server.dev/install.sh -o "$installer"
+  chmod 700 "$installer"
+  "$installer"
+  rm -f "$installer"
+  mkdir -p "/home/$ADMIN_USER/.config/code-server"
+  cat >"/home/$ADMIN_USER/.config/code-server/config.yaml" <<CFG
 bind-addr: 0.0.0.0:8680
 auth: password
 password: "$CODE_SERVER_PASSWORD"
 cert: false
 disable-telemetry: true
 CFG
-chown -R "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.config"
-chmod 600 "/home/$ADMIN_USER/.config/code-server/config.yaml"
-systemctl enable --now "code-server@$ADMIN_USER.service"
-rm -f /root/.lxc-web-install-credentials
+  chown -R "$ADMIN_USER:$ADMIN_USER" "/home/$ADMIN_USER/.config"
+  chmod 600 "/home/$ADMIN_USER/.config/code-server/config.yaml"
+  systemctl enable --now "code-server@$ADMIN_USER.service"
+}
+
+step_final(){
+  systemctl is-active --quiet apache2
+  systemctl is-active --quiet mariadb
+  systemctl is-active --quiet ssh
+  systemctl is-active --quiet smbd
+  systemctl is-active --quiet "code-server@$ADMIN_USER.service"
+  rm -f /root/.lxc-web-install-credentials
+}
+
+printf 'Installation du serveur Web Ubuntu\n'
+run_step "Configuration du réseau" step_network
+run_step "Mise à jour du système" step_system
+run_step "Apache et PHP" step_apache_php
+run_step "MariaDB" step_mariadb
+run_step "Utilisateur Linux et SSH" step_ssh_user
+run_step "phpMyAdmin" step_phpmyadmin
+run_step "Samba" step_samba
+run_step "code-server" step_code_server
+run_step "Vérification finale" step_final
+printf '\n✔ Toutes les étapes sont terminées.\n'
 INNER
   chmod 700 "$INNER_SCRIPT"
 }
