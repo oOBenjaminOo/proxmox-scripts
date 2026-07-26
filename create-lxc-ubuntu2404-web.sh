@@ -3,7 +3,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
-readonly BACKTITLE="Proxmox VE - LXC Web Ubuntu 24.04"
+readonly BACKTITLE="Proxmox VE Helper Scripts"
 LOG_FILE="/var/log/create-lxc-web-$(date '+%Y%m%d-%H%M%S').log"
 TEMP_DIR=""; CTID=""; CT_CREATION_STARTED=0
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
@@ -53,7 +53,26 @@ validate_cidr(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2]
 ask_valid(){ local v; while true; do v=$(inputbox "$1" "$2" "$3"); "$4" "$v" && { printf '%s' "$v"; return; }; wt_msg "Valeur invalide" "La valeur saisie est invalide ou déjà utilisée."; done; }
 random_password(){ od -An -N12 -tx1 /dev/urandom | tr -d ' \n'; }
 set_defaults(){ CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 100); HOSTNAME="ubuntu-web"; ROOTFS_STORAGE="local-lvm"; TEMPLATE_STORAGE="local"; CPU_CORES=2; MEMORY_MB=4096; SWAP_MB=512; DISK_GB=32; BRIDGE="vmbr0"; VLAN_TAG=0; NETWORK_MODE="dhcp"; NET_IP="dhcp"; GATEWAY=""; DNS_SERVER="8.8.8.8"; ONBOOT=1; UNPRIVILEGED=1; FIREWALL=0; ADMIN_USER="admin"; DB_ADMIN_USER="dbadmin"; }
-choose_mode(){ MODE=$(wt --title "PARAMÈTRES" --radiolist "Choisis le mode.\n\n↑/↓ : déplacer   Espace : cocher   Tab : OK   Entrée : valider" 21 96 6 "1" "Paramètres par défaut — identifiants générés automatiquement" ON "2" "Paramètres par défaut — saisie manuelle des identifiants" OFF "3" "Paramètres avancés — configuration complète et identifiants personnalisés" OFF "4" "Quitter" OFF) || exit 0; MODE=${MODE//\"/}; [[ -n "$MODE" ]] || { wt_msg "Sélection obligatoire" "Coche un choix avec la barre espace."; choose_mode; return; }; case "$MODE" in 1|2|3) ;; 4) exit 0 ;; *) wt_msg "Erreur" "Mode invalide : $MODE"; exit 1 ;; esac; }
+choose_mode(){
+  MODE=$(whiptail \
+    --backtitle "$BACKTITLE" \
+    --title "Options du script" \
+    --ok-button "Sélectionner" --cancel-button "Quitter le script" \
+    --notags \
+    --menu "\nChoisis une option :\n Utilise TAB ou les flèches pour naviguer, ENTRÉE pour sélectionner.\n" \
+    20 82 8 \
+    "1" "Paramètres par défaut — identifiants générés automatiquement" \
+    "2" "Paramètres par défaut — saisie manuelle des identifiants" \
+    "3" "Paramètres avancés — configuration complète et identifiants personnalisés" \
+    "4" "Quitter" \
+    --default-item "1" \
+    3>&1 1>&2 2>&3) || exit 0
+  case "$MODE" in
+    1|2|3) ;;
+    4) exit 0 ;;
+    *) wt_msg "Erreur" "Mode invalide : $MODE"; exit 1 ;;
+  esac
+}
 choose_storages(){ ROOTFS_STORAGE=$(storage_menu rootdir "Stockage du conteneur" "$ROOTFS_STORAGE") || exit 0; TEMPLATE_STORAGE=$(storage_menu vztmpl "Stockage du template" "$TEMPLATE_STORAGE") || exit 0; }
 advanced_configuration(){ CTID=$(ask_valid "VMID" "Identifiant du conteneur." "$CTID" validate_id); HOSTNAME=$(ask_valid "Nom" "Nom d'hôte du conteneur." "$HOSTNAME" validate_hostname); CPU_CORES=$(ask_valid "CPU" "Nombre de cœurs." "$CPU_CORES" validate_uint); MEMORY_MB=$(ask_valid "RAM" "Mémoire en Mo." "$MEMORY_MB" validate_uint); SWAP_MB=$(ask_valid "Swap" "Swap en Mo." "$SWAP_MB" validate_uint); DISK_GB=$(ask_valid "Disque" "Taille en Go." "$DISK_GB" validate_uint); BRIDGE=$(inputbox "Bridge" "Bridge Proxmox." "$BRIDGE"); VLAN_TAG=$(ask_valid "VLAN" "0 pour aucun VLAN." "$VLAN_TAG" validate_uint); if wt_yesno "Réseau" "Utiliser DHCP ?"; then NETWORK_MODE=dhcp; NET_IP=dhcp; GATEWAY=""; else NETWORK_MODE=static; NET_IP=$(ask_valid "IPv4" "Adresse avec préfixe." "192.168.1.50/24" validate_cidr); GATEWAY=$(ask_valid "Passerelle" "Passerelle IPv4." "192.168.1.1" validate_ip); fi; DNS_SERVER=$(ask_valid "DNS" "Serveur DNS IPv4." "$DNS_SERVER" validate_ip); wt_yesno "Pare-feu" "Activer le pare-feu Proxmox sur l'interface ?" && FIREWALL=1 || FIREWALL=0; wt_yesno "Démarrage" "Démarrer automatiquement avec Proxmox ?" && ONBOOT=1 || ONBOOT=0; wt_yesno "Isolation" "Créer un LXC non privilégié ?" && UNPRIVILEGED=1 || UNPRIVILEGED=0; }
 validate_bridge(){ ip link show "$BRIDGE" >/dev/null 2>&1 || { wt_msg "Bridge introuvable" "Le bridge $BRIDGE n'existe pas."; exit 1; }; }
@@ -74,7 +93,8 @@ create_container(){
   umask 022
   pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0
   umask "$previous_umask"
-  msg_ok "Conteneur créé."
+  write_notes "Adresse IP en attente" "Installation en cours"
+  msg_ok "Conteneur créé et notes Proxmox renseignées."
   msg_info "Configuration réseau Proxmox : $(pct config "$CTID" | sed -n 's/^net0: //p')"
 }
 build_installer(){ TEMP_DIR=$(mktemp -d); INNER_SCRIPT="$TEMP_DIR/install.sh"; CREDS="$TEMP_DIR/credentials.env"; cat >"$CREDS" <<EOF
@@ -162,9 +182,11 @@ chmod 700 "$INNER_SCRIPT"; }
 install_inside(){ msg_info "Démarrage du conteneur..."; pct start "$CTID"; for _ in {1..60}; do pct exec "$CTID" -- true >/dev/null 2>&1 && break; sleep 2; done; pct exec "$CTID" -- true >/dev/null 2>&1 || { msg_err "Le conteneur ne répond pas."; exit 1; }; pct push "$CTID" "$INNER_SCRIPT" /root/install-applications.sh --perms 700; pct push "$CTID" "$CREDS" /root/.lxc-web-install-credentials --perms 600; msg_info "Installation des applications..."; pct exec "$CTID" -- bash /root/install-applications.sh; pct exec "$CTID" -- rm -f /root/install-applications.sh /root/.lxc-web-install-credentials; msg_ok "Applications installées."; }
 container_ip(){ pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true; }
 escape_notes(){ local v="$1"; v=${v//&/&amp;}; v=${v//</&lt;}; v=${v//>/&gt;}; printf '%s' "$v"; }
-write_notes(){ local ip="$1" h au ap du dp cp rp notes; h=$(escape_notes "$HOSTNAME"); au=$(escape_notes "$ADMIN_USER"); ap=$(escape_notes "$ADMIN_PASSWORD"); du=$(escape_notes "$DB_ADMIN_USER"); dp=$(escape_notes "$DB_ADMIN_PASSWORD"); cp=$(escape_notes "$CODE_SERVER_PASSWORD"); rp=$(escape_notes "$CT_ROOT_PASSWORD"); notes="<div align='center'>
+write_notes(){ local ip="$1" status="$2" h au ap du dp cp rp st notes; h=$(escape_notes "$HOSTNAME"); au=$(escape_notes "$ADMIN_USER"); ap=$(escape_notes "$ADMIN_PASSWORD"); du=$(escape_notes "$DB_ADMIN_USER"); dp=$(escape_notes "$DB_ADMIN_PASSWORD"); cp=$(escape_notes "$CODE_SERVER_PASSWORD"); rp=$(escape_notes "$CT_ROOT_PASSWORD"); st=$(escape_notes "$status"); notes="<div align='center'>
 
-# ${h}
+<h2 style='font-size: 24px; margin: 20px 0;'>${h}</h2>
+
+<p><strong>État :</strong> ${st}</p>
 
 </div>
 
@@ -188,7 +210,7 @@ write_notes(){ local ip="$1" h au ap du dp cp rp notes; h=$(escape_notes "$HOSTN
 - DNS : ${DNS_SERVER}
 - Bridge : ${BRIDGE}
 - VLAN : ${VLAN_TAG}
-"; pct set "$CTID" --description "$notes" >/dev/null; msg_ok "Notes Proxmox renseignées."; }
-finish(){ local ip; ip=$(container_ip); ip=${ip:-adresse_non_detectee}; write_notes "$ip"; CT_CREATION_STARTED=0; wt_msg "INSTALLATION TERMINÉE" "Conteneur prêt.\n\nVMID : $CTID\nNom : $HOSTNAME\nIP : $ip\n\nApache : http://$ip\nphpMyAdmin : http://$ip/phpmyadmin\ncode-server : http://$ip:8680\nSamba : \\\\$ip\\Web\nSSH : $ADMIN_USER@$ip"; msg_ok "LXC $CTID prêt : http://$ip"; }
+"; pct set "$CTID" --description "$notes" >/dev/null; msg_ok "Notes Proxmox mises à jour : $status."; }
+finish(){ local ip; ip=$(container_ip); ip=${ip:-adresse_non_detectee}; write_notes "$ip" "Installation terminée"; CT_CREATION_STARTED=0; wt_msg "INSTALLATION TERMINÉE" "Conteneur prêt.\n\nVMID : $CTID\nNom : $HOSTNAME\nIP : $ip\n\nApache : http://$ip\nphpMyAdmin : http://$ip/phpmyadmin\ncode-server : http://$ip:8680\nSamba : \\\\$ip\\Web\nSSH : $ADMIN_USER@$ip"; msg_ok "LXC $CTID prêt : http://$ip"; }
 main(){ require_environment; touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; exec > >(tee -a "$LOG_FILE") 2>&1; set_defaults; choose_mode; choose_storages; case "$MODE" in 1) default_credentials ;; 2) advanced_credentials ;; 3) advanced_configuration; advanced_credentials ;; *) msg_err "Mode invalide : $MODE"; exit 1 ;; esac; validate_bridge; validate_storage; confirm; download_template; build_installer; create_container; install_inside; finish; }
 main "$@"
