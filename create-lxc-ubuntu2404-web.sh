@@ -62,7 +62,21 @@ advanced_credentials(){ CT_ROOT_PASSWORD=$(passwordbox "Mot de passe root" "Mot 
 default_credentials(){ ADMIN_USER="admin"; DB_ADMIN_USER="dbadmin"; CT_ROOT_PASSWORD=$(random_password); ADMIN_PASSWORD=$(random_password); DB_ADMIN_PASSWORD=$(random_password); CODE_SERVER_PASSWORD=$(random_password); msg_ok "Identifiants sécurisés générés automatiquement pour le mode par défaut."; }
 confirm(){ local credential_mode; [[ "$MODE" == 1 ]] && credential_mode="Générés automatiquement et inscrits dans les notes Proxmox" || credential_mode="Personnalisés"; wt_yesno "CONFIRMATION" "VMID : $CTID\nNom : $HOSTNAME\nStockage racine : $ROOTFS_STORAGE\nTemplate : $TEMPLATE_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nBridge : $BRIDGE\nRéseau : $NETWORK_MODE\nDNS : $DNS_SERVER\nUtilisateur Linux : $ADMIN_USER\nUtilisateur MariaDB : $DB_ADMIN_USER\nIdentifiants : $credential_mode\n\nCréer le conteneur ?" || exit 0; }
 download_template(){ msg_info "Recherche du template Ubuntu 24.04..."; pveam update >/dev/null; TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-24\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1); [[ -n "$TEMPLATE_NAME" ]] || { msg_err "Template introuvable."; exit 1; }; TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"; pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"; msg_ok "Template prêt."; }
-create_container(){ local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"; [[ "$NETWORK_MODE" == static ]] && net0+=",gw=${GATEWAY}"; (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"; msg_info "Création du conteneur LXC $CTID..."; CT_CREATION_STARTED=1; pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0; msg_ok "Conteneur créé."; msg_info "Configuration réseau Proxmox : $(pct config "$CTID" | sed -n 's/^net0: //p')"; }
+create_container(){
+  local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth"
+  local previous_umask
+  [[ "$NETWORK_MODE" == dhcp ]] && net0+=",ip6=dhcp"
+  [[ "$NETWORK_MODE" == static ]] && net0+=",gw=${GATEWAY}"
+  (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"
+  msg_info "Création du conteneur LXC $CTID..."
+  CT_CREATION_STARTED=1
+  previous_umask=$(umask)
+  umask 022
+  pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0
+  umask "$previous_umask"
+  msg_ok "Conteneur créé."
+  msg_info "Configuration réseau Proxmox : $(pct config "$CTID" | sed -n 's/^net0: //p')"
+}
 build_installer(){ TEMP_DIR=$(mktemp -d); INNER_SCRIPT="$TEMP_DIR/install.sh"; CREDS="$TEMP_DIR/credentials.env"; cat >"$CREDS" <<EOF
 ADMIN_USER='$ADMIN_USER'
 ADMIN_PASSWORD_B64='$(printf %s "$ADMIN_PASSWORD" | base64 -w0)'
@@ -80,27 +94,14 @@ ADMIN_PASSWORD=$(printf %s "$ADMIN_PASSWORD_B64" | base64 -d)
 DB_ADMIN_PASSWORD=$(printf %s "$DB_ADMIN_PASSWORD_B64" | base64 -d)
 CODE_SERVER_PASSWORD=$(printf %s "$CODE_SERVER_PASSWORD_B64" | base64 -d)
 
-printf '[RÉSEAU] Activation de eth0 et de systemd-networkd...\n'
-systemctl unmask systemd-networkd.service systemd-networkd.socket >/dev/null 2>&1 || true
-systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
-ip link set dev eth0 up
-systemctl restart systemd-networkd.service
-networkctl reload >/dev/null 2>&1 || true
-networkctl reconfigure eth0 >/dev/null 2>&1 || true
-
-printf '[RÉSEAU] Attente de l’adresse IPv4 DHCP...\n'
-for i in {1..60}; do
+printf '[RÉSEAU] Attente de la configuration IPv4 native de Proxmox...\n'
+for _ in {1..60}; do
   if ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' && ip route show default | grep -q '^default '; then
     break
   fi
-  if (( i % 15 == 0 )); then
-    ip link set dev eth0 up || true
-    systemctl restart systemd-networkd.service >/dev/null 2>&1 || true
-    networkctl reconfigure eth0 >/dev/null 2>&1 || true
-  fi
   sleep 2
 done
-ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; ip link show eth0 || true; ip addr show eth0 || true; ip route || true; systemctl status systemd-networkd --no-pager || true; networkctl status eth0 --no-pager || true; cat /etc/systemd/network/eth0.network 2>/dev/null || true; journalctl -u systemd-networkd --no-pager -n 100 || true; exit 1; }
+ip -4 -o addr show dev eth0 scope global | grep -q 'inet ' || { echo 'ERREUR : aucune IPv4 obtenue.'; ip link show eth0 || true; ip addr show eth0 || true; ip route || true; systemctl status systemd-networkd --no-pager || true; networkctl status eth0 --no-pager || true; stat /etc/systemd/network/eth0.network 2>/dev/null || true; cat /etc/systemd/network/eth0.network 2>/dev/null || true; journalctl -u systemd-networkd --no-pager -n 100 || true; exit 1; }
 ip route show default | grep -q '^default ' || { echo 'ERREUR : aucune route par défaut.'; ip route; exit 1; }
 printf 'nameserver %s\noptions timeout:2 attempts:2\n' "$DNS_SERVER" > /etc/resolv.conf
 getent ahostsv4 archive.ubuntu.com >/dev/null || { echo "ERREUR DNS avec $DNS_SERVER"; exit 1; }
