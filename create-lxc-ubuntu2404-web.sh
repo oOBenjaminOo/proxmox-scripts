@@ -160,7 +160,7 @@ rm -f /root/.lxc-web-install-credentials
 INNER
 chmod 700 "$INNER_SCRIPT"; }
 install_inside(){ msg_info "Démarrage du conteneur..."; pct start "$CTID"; for _ in {1..60}; do pct exec "$CTID" -- true >/dev/null 2>&1 && break; sleep 2; done; pct exec "$CTID" -- true >/dev/null 2>&1 || { msg_err "Le conteneur ne répond pas."; exit 1; }; pct push "$CTID" "$INNER_SCRIPT" /root/install-applications.sh --perms 700; pct push "$CTID" "$CREDS" /root/.lxc-web-install-credentials --perms 600; msg_info "Installation des applications..."; pct exec "$CTID" -- bash /root/install-applications.sh; pct exec "$CTID" -- rm -f /root/install-applications.sh /root/.lxc-web-install-credentials; msg_ok "Applications installées."; }
-container_ip(){ pct exec "$CTID" -- sh -c "ip -4 -o addr show dev eth0 scope global | awk '{print \\$4}' | cut -d/ -f1 | head -n1" 2>/dev/null || true; }
+container_ip(){ pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}' || true; }
 escape_notes(){ local v="$1"; v=${v//&/&amp;}; v=${v//</&lt;}; v=${v//>/&gt;}; printf '%s' "$v"; }
 write_notes(){ local ip="$1" h au ap du dp cp rp notes; h=$(escape_notes "$HOSTNAME"); au=$(escape_notes "$ADMIN_USER"); ap=$(escape_notes "$ADMIN_PASSWORD"); du=$(escape_notes "$DB_ADMIN_USER"); dp=$(escape_notes "$DB_ADMIN_PASSWORD"); cp=$(escape_notes "$CODE_SERVER_PASSWORD"); rp=$(escape_notes "$CT_ROOT_PASSWORD"); notes="<div align='center'>
 
