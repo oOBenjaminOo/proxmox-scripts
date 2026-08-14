@@ -55,7 +55,8 @@ default_credentials(){ ADMIN_USER="admin"; DB_ADMIN_USER="dbadmin"; CT_ROOT_PASS
 confirm(){ local cm; [[ "$MODE" == 1 ]] && cm="Générés automatiquement" || cm="Personnalisés"; wt_yesno "CONFIRMATION - SYSTÈME HÉRITÉ" "ATTENTION : Ubuntu 18.04 et PHP 5.5.38 ne sont plus maintenus.\nCe serveur doit rester isolé d'Internet.\n\nPHP sera compilé et installé nativement, sans Docker.\n\nVMID : $CTID\nNom : $HOSTNAME\nStockage : $ROOTFS_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nRéseau : $NETWORK_MODE\nUtilisateur Linux : $ADMIN_USER\nIdentifiants : $cm\n\nCréer le conteneur ?" || exit 0; }
 
 download_template(){
-  local template_url template_path partial_path
+  local template_url template_path partial_path downloaded=0
+  local template_urls=()
   readonly FALLBACK_TEMPLATE="ubuntu-18.04-standard_18.04.1-1_amd64.tar.gz"
   readonly FALLBACK_SHA256="58a9d7db4c44433e24aa58634f029e06816da64dbf7f2cbfb8a76ca3d607e733"
   msg_info "Recherche du template Ubuntu 18.04..."
@@ -79,12 +80,22 @@ download_template(){
     return
   fi
 
-  template_url="https://download.proxmox.com/images/system/${TEMPLATE_NAME}"
+  template_urls+=("http://download.proxmox.com/images/system/${TEMPLATE_NAME}")
+  template_urls+=("https://mirrors.coreix.net/proxmox/images/system/${TEMPLATE_NAME}")
   partial_path="${template_path}.part"
   mkdir -p "$(dirname "$template_path")"
-  if ! curl -fL --retry 3 --connect-timeout 20 "$template_url" -o "$partial_path"; then
+  for template_url in "${template_urls[@]}"; do
+    msg_info "Téléchargement depuis $template_url"
     rm -f "$partial_path"
-    msg_err "Échec du téléchargement du template Ubuntu 18.04."
+    if curl -fL --retry 2 --connect-timeout 20 "$template_url" -o "$partial_path"; then
+      downloaded=1
+      break
+    fi
+    msg_warn "Cette adresse de téléchargement n'est pas accessible, essai de la suivante."
+  done
+  if (( downloaded == 0 )); then
+    rm -f "$partial_path"
+    msg_err "Toutes les adresses de téléchargement du template Ubuntu 18.04 ont échoué."
     exit 1
   fi
   if ! echo "$FALLBACK_SHA256  $partial_path" | sha256sum -c -; then
