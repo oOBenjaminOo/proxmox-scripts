@@ -33,7 +33,7 @@ wt_msg(){ whiptail --backtitle "$BACKTITLE" --title "$1" --msgbox "$2" 19 86; }
 wt_yesno(){ whiptail --backtitle "$BACKTITLE" --title "$1" --yesno "$2" 19 86; }
 inputbox(){ local v; v=$(wt --title "$1" --inputbox "$2" 12 76 "$3") || exit 0; printf '%s' "$v"; }
 passwordbox(){ local a b; while true; do a=$(wt --title "$1" --passwordbox "$2\n\nMinimum : 8 caractères." 14 76) || exit 0; (( ${#a} >= 8 )) || { wt_msg "Valeur invalide" "Le mot de passe doit contenir au moins 8 caractères."; continue; }; b=$(wt --title "$1" --passwordbox "Confirme le mot de passe." 12 76) || exit 0; [[ "$a" == "$b" ]] && { printf '%s' "$a"; return; }; wt_msg "Erreur" "Les deux mots de passe ne correspondent pas."; done; }
-require_environment(){ [[ $EUID -eq 0 ]] || { msg_err "Exécute ce script en root sur Proxmox VE."; exit 1; }; for c in pct qm pveam pvesm pvesh whiptail tr head; do command -v "$c" >/dev/null || { msg_err "Commande manquante : $c"; exit 1; }; done; }
+require_environment(){ [[ $EUID -eq 0 ]] || { msg_err "Exécute ce script en root sur Proxmox VE."; exit 1; }; for c in pct qm pveam pvesm pvesh whiptail curl sha256sum tr head; do command -v "$c" >/dev/null || { msg_err "Commande manquante : $c"; exit 1; }; done; }
 storage_type(){ local s="$1" t=""; t=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $2}') || true; [[ -n "$t" ]] || t=$(awk -v id="$s" '/^[[:alnum:]_-]+:[[:space:]]+/ {split($0,a,":"); cur=a[2]; sub(/^[[:space:]]+/,"",cur); typ=a[1]} cur==id {print typ; exit}' /etc/pve/storage.cfg 2>/dev/null || true); printf '%s' "$t"; }
 storage_menu(){ local content="$1" title="$2" def="$3" s t u state selected; local rows=(); while read -r s; do [[ -z "$s" ]] && continue; t=$(storage_type "$s"); u=$(pvesm status --storage "$s" 2>/dev/null | awk 'NR==2 {print $6" libres"}') || true; [[ "$s" == "$def" ]] && state=ON || state=OFF; rows+=("$s" "Type: ${t:-inconnu} | ${u:-espace inconnu}" "$state"); done < <(pvesm status -content "$content" 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | sort -u); (( ${#rows[@]} )) || { wt_msg "Erreur" "Aucun stockage compatible avec $content."; exit 1; }; selected=$(wt --title "$title" --radiolist "Sélectionne un stockage.\n\n↑/↓ : déplacer   Espace : cocher   Tab : OK   Entrée : valider" 22 94 12 "${rows[@]}") || exit 0; selected=${selected//\"/}; [[ -n "$selected" ]] || { wt_msg "Sélection obligatoire" "Coche un stockage avec la barre espace."; storage_menu "$content" "$title" "$def"; return; }; printf '%s' "$selected"; }
 
@@ -54,7 +54,48 @@ advanced_credentials(){ CT_ROOT_PASSWORD=$(passwordbox "Mot de passe root" "Mot 
 default_credentials(){ ADMIN_USER="admin"; DB_ADMIN_USER="dbadmin"; CT_ROOT_PASSWORD=$(random_password); ADMIN_PASSWORD=$(random_password); DB_ADMIN_PASSWORD=$(random_password); CODE_SERVER_PASSWORD=$(random_password); }
 confirm(){ local cm; [[ "$MODE" == 1 ]] && cm="Générés automatiquement" || cm="Personnalisés"; wt_yesno "CONFIRMATION - SYSTÈME HÉRITÉ" "ATTENTION : Ubuntu 18.04 et PHP 5.5.38 ne sont plus maintenus.\nCe serveur doit rester isolé d'Internet.\n\nPHP sera compilé et installé nativement, sans Docker.\n\nVMID : $CTID\nNom : $HOSTNAME\nStockage : $ROOTFS_STORAGE\nCPU : $CPU_CORES\nRAM : $MEMORY_MB Mo\nDisque : $DISK_GB Go\nRéseau : $NETWORK_MODE\nUtilisateur Linux : $ADMIN_USER\nIdentifiants : $cm\n\nCréer le conteneur ?" || exit 0; }
 
-download_template(){ msg_info "Recherche du template Ubuntu 18.04..."; pveam update >/dev/null; TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-18\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1); [[ -n "$TEMPLATE_NAME" ]] || { msg_err "Template Ubuntu 18.04 introuvable sur le serveur Proxmox."; exit 1; }; TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"; pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"; }
+download_template(){
+  local template_url template_path partial_path
+  readonly FALLBACK_TEMPLATE="ubuntu-18.04-standard_18.04.1-1_amd64.tar.gz"
+  readonly FALLBACK_SHA256="58a9d7db4c44433e24aa58634f029e06816da64dbf7f2cbfb8a76ca3d607e733"
+  msg_info "Recherche du template Ubuntu 18.04..."
+  pveam update >/dev/null
+  TEMPLATE_NAME=$(pveam available --section system | awk '$2 ~ /^ubuntu-18\.04-standard_.*_amd64\.tar\.(zst|xz|gz)$/ {print $2}' | sort -V | tail -n1)
+  if [[ -n "$TEMPLATE_NAME" ]]; then
+    TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
+    pveam list "$TEMPLATE_STORAGE" | awk 'NR>1 {print $1}' | grep -qx "$TEMPLATE_VOLUME" || pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_NAME"
+    msg_ok "Template Ubuntu 18.04 prêt."
+    return
+  fi
+
+  msg_warn "Le catalogue pveam ne référence plus Ubuntu 18.04. Téléchargement depuis l'archive officielle Proxmox."
+  TEMPLATE_NAME="$FALLBACK_TEMPLATE"
+  TEMPLATE_VOLUME="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_NAME}"
+  template_path=$(pvesm path "$TEMPLATE_VOLUME" 2>/dev/null || true)
+  [[ -n "$template_path" && "$template_path" == /* ]] || { msg_err "Impossible de déterminer le chemin du stockage $TEMPLATE_STORAGE."; exit 1; }
+  if [[ -f "$template_path" ]]; then
+    echo "$FALLBACK_SHA256  $template_path" | sha256sum -c -
+    msg_ok "Template Ubuntu 18.04 déjà présent et vérifié."
+    return
+  fi
+
+  template_url="https://download.proxmox.com/images/system/${TEMPLATE_NAME}"
+  partial_path="${template_path}.part"
+  mkdir -p "$(dirname "$template_path")"
+  if ! curl -fL --retry 3 --connect-timeout 20 "$template_url" -o "$partial_path"; then
+    rm -f "$partial_path"
+    msg_err "Échec du téléchargement du template Ubuntu 18.04."
+    exit 1
+  fi
+  if ! echo "$FALLBACK_SHA256  $partial_path" | sha256sum -c -; then
+    rm -f "$partial_path"
+    msg_err "La somme SHA-256 du template Ubuntu 18.04 est incorrecte."
+    exit 1
+  fi
+  chmod 0644 "$partial_path"
+  mv "$partial_path" "$template_path"
+  msg_ok "Template Ubuntu 18.04 téléchargé et vérifié."
+}
 create_container(){ local net0="name=eth0,bridge=${BRIDGE},ip=${NET_IP},firewall=${FIREWALL},type=veth" previous_umask; [[ "$NETWORK_MODE" == dhcp ]] && net0+=",ip6=dhcp"; [[ "$NETWORK_MODE" == static ]] && net0+=",gw=${GATEWAY}"; (( VLAN_TAG > 0 )) && net0+=",tag=${VLAN_TAG}"; CT_CREATION_STARTED=1; previous_umask=$(umask); umask 022; pct create "$CTID" "$TEMPLATE_VOLUME" --hostname "$HOSTNAME" --ostype ubuntu --arch amd64 --cores "$CPU_CORES" --memory "$MEMORY_MB" --swap "$SWAP_MB" --rootfs "${ROOTFS_STORAGE}:${DISK_GB}" --net0 "$net0" --nameserver "$DNS_SERVER" --password "$CT_ROOT_PASSWORD" --unprivileged "$UNPRIVILEGED" --features "nesting=1,keyctl=1" --onboot "$ONBOOT" --start 0; umask "$previous_umask"; write_notes "Adresse IP en attente" "Installation en cours"; }
 
 build_installer(){
