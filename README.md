@@ -2,11 +2,19 @@
 
 Collection de scripts Bash permettant d'automatiser le déploiement de conteneurs LXC sur Proxmox VE.
 
-## Script disponible
+## Scripts disponibles
 
 ### `create-lxc-ubuntu2404-web.sh`
 
 Ce script crée automatiquement un conteneur LXC sous **Ubuntu 24.04 LTS** et installe un environnement complet pour héberger et administrer un serveur Web.
+
+### `create-lxc-ubuntu2404-web-php55.sh`
+
+Cette variante crée un LXC Ubuntu 24.04 avec le même environnement, mais utilise exactement **PHP 5.5.38**. Apache, MariaDB, SSH, Samba et code-server restent installés depuis Ubuntu 24.04 ; PHP-FPM 5.5.38 est isolé dans Docker et accessible uniquement localement par Apache.
+
+> PHP 5.5.38 n'est plus maintenu depuis 2016. Réservez cette variante aux applications héritées et ne l'exposez pas directement à Internet.
+
+Les sections suivantes décrivent principalement le script PHP 8.3. La variante PHP 5.5.38 conserve les mêmes modes de configuration et les mêmes accès aux services.
 
 ## Applications installées
 
@@ -143,6 +151,12 @@ Connectez-vous en root sur un nœud Proxmox VE, puis exécutez :
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/oOBenjaminOo/proxmox-scripts/main/create-lxc-ubuntu2404-web.sh)"
+```
+
+Pour créer la variante PHP 5.5.38 :
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/oOBenjaminOo/proxmox-scripts/main/create-lxc-ubuntu2404-web-php55.sh)"
 ```
 
 ## Prérequis
