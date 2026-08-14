@@ -14,6 +14,12 @@ Cette variante crée un LXC Ubuntu 24.04 avec le même environnement, mais utili
 
 > PHP 5.5.38 n'est plus maintenu depuis 2016. Réservez cette variante aux applications héritées et ne l'exposez pas directement à Internet.
 
+### `create-lxc-ubuntu1804-web-php55-native.sh`
+
+Cette seconde variante PHP 5.5.38 utilise **Ubuntu 18.04** et compile PHP directement dans le LXC. Elle fonctionne nativement avec Apache et PHP-FPM, sans Docker. Elle conserve MariaDB, phpMyAdmin 4.9.11, Samba, SSH et une version de code-server compatible avec Ubuntu 18.04.
+
+> Ubuntu 18.04 et PHP 5.5.38 sont tous deux obsolètes. Ce script est réservé aux applications héritées sur un réseau privé.
+
 Les sections suivantes décrivent principalement le script PHP 8.3. La variante PHP 5.5.38 conserve les mêmes modes de configuration et les mêmes accès aux services.
 
 ## Applications installées
@@ -157,6 +163,12 @@ Pour créer la variante PHP 5.5.38 :
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/oOBenjaminOo/proxmox-scripts/main/create-lxc-ubuntu2404-web-php55.sh)"
+```
+
+Pour créer la variante PHP 5.5.38 native, sans Docker :
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/oOBenjaminOo/proxmox-scripts/main/create-lxc-ubuntu1804-web-php55-native.sh)"
 ```
 
 ## Prérequis
